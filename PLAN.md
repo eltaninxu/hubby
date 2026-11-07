@@ -1,5 +1,15 @@
 # Hubby 实现计划
 
+> ⚠ **v2 已落地(2026-11-07,Royola 拍板),以 `SPEC.md` 的 "v2 变更" 一节为准。**
+> 资金方向已反转:先 **Fund the pot**(Orders 充值),批准后 **Payouts 打回**用户;
+> 硬顶 = pot 余额,`MONTHLY_CAP_USD` 已删除,新增 `HUBBY_RECIPIENT_EMAIL`;
+> 账本分 `request / deposit / release` 三种 kind。
+> 下面第 1–18 节描述的是 **v1**(月预算 + 用户付给商户),只作历史参考。
+>
+> v2 落地状态(2026-11-07):线上 `https://hubby.royola.dev` 跑 v2;验收脚本
+> `scripts/acceptance.py` 按 SPEC v2.6 重写,2026-11-07 一轮 `evidence/acceptance-v2/` 全过;
+> 离线测试 29 个;Payouts 已开通,沙箱到账约 20–60 秒,轮询窗口默认 30×1.5s。
+
 > 依据 `SPEC.md`。本文只定"怎么做",不改需求。第 12 节列了必须你/家长拍板的事,其余按此执行。
 > 写于 2026-11-07 PT(比 SPEC 的 Day 1 早一天)。
 

@@ -1,4 +1,4 @@
-"""FastAPI app: chat, ledger, settings, and the PayPal return legs."""
+"""FastAPI app: chat, pot, ledger, settings, and both PayPal legs."""
 
 from __future__ import annotations
 
@@ -18,14 +18,18 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.budget import assess_cap, cap_label, hard_cap_reason, money, reserved_reason
+from app.budget import money, pot_covers, pot_refusal_reason
 from app.config import ConfigError, get_settings
 from app.db import Database, today_iso
 from app.llm import LLMError, HubbyBrain
-from app.paypal import PayPalError, client_from_settings
+from app.paypal import PayPalError, client_from_settings, payout_error_message
 from app.ratelimit import RateLimiter
 
 log = logging.getLogger("hubby")
+
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+templates.env.globals["money"] = money
 
 # "3", "$3", "about 3.50", "3 dollars" -- an answer to "how much is it?"
 FOLLOWUP_PRICE = re.compile(
@@ -34,15 +38,18 @@ FOLLOWUP_PRICE = re.compile(
     re.IGNORECASE,
 )
 PENDING_TTL_SECONDS = 15 * 60
-
-BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-templates.env.globals["money"] = money
-templates.env.globals["cap_label"] = cap_label
+FUND_MAX_USD = 500.0
 
 
 def _seed_enabled() -> bool:
     return os.environ.get("HUBBY_SEED", "1").strip().lower() not in {"0", "false", "no"}
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def _session_id(request: Request) -> str:
@@ -66,15 +73,7 @@ def _take_question(state: Any, session: str) -> dict[str, Any] | None:
     return pending
 
 
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
 async def _maintenance(app: FastAPI) -> None:
-    """Keep the demo honest: slide seed dates forward, reset an abandoned demo."""
     settings = app.state.settings
     while True:
         await asyncio.sleep(settings.maintenance_seconds)
@@ -84,11 +83,11 @@ async def _maintenance(app: FastAPI) -> None:
                 settings.demo_reset
                 and db.hours_since_last_entry() >= settings.demo_reset_after_hours
             ):
-                db.reset_demo(settings.monthly_cap_usd)
-                log.info("demo reset: household returned to seeded state")
+                db.reset_demo(settings.recipient_email)
+                log.info("demo reset: pot and ledger back to seeded state")
             elif db.refresh_seed_dates():
                 log.info("seed dates refreshed")
-        except Exception:  # noqa: BLE001 - a background janitor must not die
+        except Exception:  # noqa: BLE001
             log.exception("maintenance failed")
 
 
@@ -100,11 +99,11 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"Cannot start Hubby: {exc}") from exc
 
     db = Database(settings.db_path)
-    db.init(settings.monthly_cap_usd, seed=_seed_enabled())
+    db.init(recipient_email=settings.recipient_email, seed=_seed_enabled())
 
     if settings.demo_reset and db.hours_since_last_entry() >= settings.demo_reset_after_hours:
-        db.reset_demo(settings.monthly_cap_usd)
-        log.info("demo reset on boot: household returned to seeded state")
+        db.reset_demo(settings.recipient_email)
+        log.info("demo reset on boot")
     else:
         db.refresh_seed_dates()
 
@@ -116,6 +115,7 @@ async def lifespan(app: FastAPI):
     app.state.limiter = RateLimiter(
         {
             "api": settings.rate_api,
+            "fund": settings.rate_fund,
             "settings": settings.rate_settings,
             "global": settings.rate_global,
         }
@@ -139,27 +139,35 @@ def _flash_redirect(message: str) -> RedirectResponse:
 
 def _ledger_line(entry: dict[str, Any]) -> str:
     stamp = (entry.get("paid_at") or entry.get("created_at") or "")[:10]
+    amount = money(entry.get("amount_usd"))
+    kind = entry.get("kind") or "request"
+    if kind == "deposit":
+        return f"{stamp} | deposit | +{amount} | - | {entry.get('status')}"
+    if kind == "release":
+        category = entry.get("category") or "other"
+        return f"{stamp} | {entry.get('raw_text', '')} | -{amount} | {category} | {entry.get('status')}"
     category = entry.get("category") or "other"
-    return (
-        f"{stamp} | {entry.get('raw_text', '')} | {money(entry.get('amount_usd'))}"
-        f" | {category} | {entry.get('status')}"
-    )
+    return f"{stamp} | {entry.get('raw_text', '')} | {amount} | {category} | {entry.get('status')}"
 
 
-def _budget_view(db: Database) -> dict[str, Any]:
-    row = db.get_settings()
-    used = db.month_paid_usd()
-    pending = db.month_pending_usd()
-    cap = float(row.get("monthly_cap_usd") or 0)
-    percent = min(100.0, round(used / cap * 100, 1)) if cap > 0 else 0.0
+def _pot_view(db: Database) -> dict[str, Any]:
     return {
-        "used": used,
-        "pending": pending,
-        "cap": cap,
-        "percent": percent,
-        "over": used > cap,
+        "pot": db.pot_balance(),
+        "deposits": db.month_deposits(),
+        "releases": db.month_releases(),
         "categories": db.category_totals(),
     }
+
+
+def _rate_limited(request: Request, scope: str) -> JSONResponse | None:
+    allowed, retry_after = request.app.state.limiter.allow(scope, _client_ip(request))
+    if allowed:
+        return None
+    return JSONResponse(
+        {"error": f"Too many requests from this address. Try again in {retry_after}s."},
+        status_code=429,
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 # -- pages -----------------------------------------------------------------
@@ -169,15 +177,11 @@ async def chat_page(request: Request, flash: str | None = None):
     response = templates.TemplateResponse(
         request,
         "chat.html",
-        {"flash": flash, "budget": _budget_view(db), "recent": db.recent(5)},
+        {"flash": flash, "pot": _pot_view(db), "recent": db.recent(6)},
     )
     if not request.cookies.get("hubby_sid"):
         response.set_cookie(
-            "hubby_sid",
-            uuid.uuid4().hex,
-            httponly=True,
-            samesite="lax",
-            max_age=86_400,
+            "hubby_sid", uuid.uuid4().hex, httponly=True, samesite="lax", max_age=86_400
         )
     return response
 
@@ -188,7 +192,7 @@ async def ledger_page(request: Request, flash: str | None = None):
     return templates.TemplateResponse(
         request,
         "ledger.html",
-        {"flash": flash, "budget": _budget_view(db), "entries": db.all_entries()},
+        {"flash": flash, "pot": _pot_view(db), "entries": db.all_entries()},
     )
 
 
@@ -201,7 +205,11 @@ async def settings_page(request: Request, flash: str | None = None):
 
 
 @app.post("/settings")
-async def save_settings(request: Request, rules: str = Form(""), monthly_cap_usd: str = Form("")):
+async def save_settings(
+    request: Request,
+    rules: str = Form(""),
+    recipient_email: str = Form(""),
+):
     allowed, retry_after = request.app.state.limiter.allow("settings", _client_ip(request))
     if not allowed:
         return _flash_redirect(
@@ -209,19 +217,98 @@ async def save_settings(request: Request, rules: str = Form(""), monthly_cap_usd
         )
 
     db: Database = request.app.state.db
-    try:
-        cap = round(float(monthly_cap_usd.strip()), 2)
-    except ValueError:
-        return _flash_redirect("Monthly cap must be a number.")
-    if cap <= 0:
-        return _flash_redirect("Monthly cap must be greater than zero.")
+    email = recipient_email.strip()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        return _flash_redirect("Recipient email does not look like an email address.")
     if not rules.strip():
         return _flash_redirect("The rules cannot be empty.")
-    db.save_settings(rules.strip(), cap)
-    return _flash_redirect(f"Saved. Monthly cap is now {cap_label(cap)}.")
+    db.save_settings(rules.strip(), email)
+    return _flash_redirect("Saved.")
 
 
-# -- purchase flow ---------------------------------------------------------
+@app.get("/api/pot")
+async def api_pot(request: Request):
+    return {"pot": request.app.state.db.pot_balance()}
+
+
+# -- funding the pot -------------------------------------------------------
+@app.post("/api/fund")
+async def api_fund(request: Request):
+    limited = _rate_limited(request, "fund")
+    if limited:
+        return limited
+
+    payload: dict[str, Any] = {}
+    try:
+        payload = await request.json()
+    except ValueError:
+        pass
+    try:
+        amount = round(float(payload.get("amount")), 2)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "How much do you want to put in the pot?"}, status_code=400)
+    if amount <= 0 or amount > FUND_MAX_USD:
+        return JSONResponse(
+            {"error": f"Funding amount must be between $0.01 and ${FUND_MAX_USD:.0f}."},
+            status_code=400,
+        )
+
+    state = request.app.state
+    try:
+        order_id, approve_url = await state.paypal.create_order(amount, "Fund the pot")
+    except PayPalError as exc:
+        return JSONResponse({"error": f"PayPal refused: {exc}"}, status_code=502)
+
+    state.db.add_entry(
+        kind="deposit",
+        raw_text=f"fund the pot {money(amount)}",
+        amount_usd=amount,
+        category="other",
+        decision="deposit",
+        reason="Fund the pot",
+        status="pending",
+        paypal_order_id=order_id,
+    )
+    return {"approve_url": approve_url, "order_id": order_id, "pot": state.db.pot_balance()}
+
+
+@app.get("/paypal/return")
+async def paypal_return(request: Request, token: str = ""):
+    db: Database = request.app.state.db
+    entry = db.by_order_id(token) if token else None
+    if not entry:
+        return _flash_redirect("PayPal came back with an order I don't know about.")
+
+    if entry["status"] == "paid":
+        return _flash_redirect(
+            f"This pot funding is already complete ({money(entry.get('amount_usd'))})."
+        )
+    if entry["status"] != "pending":
+        return _flash_redirect(f"That funding is {entry['status']}; nothing changed.")
+
+    try:
+        capture_id = await request.app.state.paypal.capture(token)
+    except PayPalError as exc:
+        db.mark_deposit(entry["id"], "capture_failed")
+        return _flash_redirect(f"Funding failed: {exc}")
+
+    db.mark_deposit(entry["id"], "paid", capture_id)
+    return _flash_redirect(
+        f"Pot funded +{money(entry.get('amount_usd'))} · capture {capture_id[:10]}…"
+    )
+
+
+@app.get("/paypal/cancel")
+async def paypal_cancel(request: Request, token: str = ""):
+    db: Database = request.app.state.db
+    entry = db.by_order_id(token) if token else None
+    if entry and entry["status"] == "pending":
+        db.mark_deposit(entry["id"], "cancelled")
+        return _flash_redirect("Funding cancelled. The pot is unchanged.")
+    return _flash_redirect("Cancelled. The pot is unchanged.")
+
+
+# -- spending requests -----------------------------------------------------
 @app.post("/api/request")
 async def api_request(request: Request):
     limiter: RateLimiter = request.app.state.limiter
@@ -253,7 +340,6 @@ async def api_request(request: Request):
     session = _session_id(request)
     asked = _take_question(state, session)
     if asked and FOLLOWUP_PRICE.match(text):
-        # "How much is it?" -> "3" means "bubble tea 3", not a new mystery item.
         text = f"{asked['text']} {text}".strip()
         state.pending.pop(session, None)
 
@@ -270,6 +356,7 @@ async def api_request(request: Request):
         _remember_question(state, session, text)
     else:
         state.pending.pop(session, None)
+    result["pot"] = state.db.pot_balance()
     return JSONResponse(result)
 
 
@@ -283,16 +370,17 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
     item = parsed.get("item") or text
     category = parsed.get("category") or "other"
 
-    # 2. no price -> ask, never build an order
+    # 2. no price -> ask, never move money
     if amount is None:
         reason = "How much is it?"
-        entry_id = db.add_entry(
+        db.add_entry(
+            kind="request",
             raw_text=text,
             amount_usd=None,
             category=category,
             decision="ask",
             reason=reason,
-            status="declined",
+            status="ask",
         )
         return {
             "decision": "ask",
@@ -300,22 +388,15 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "amount": None,
             "item": item,
             "category": category,
-            "status": "declined",
-            "ledger_id": entry_id,
+            "status": "ask",
         }
 
-    # 3. hard cap, in code, before the model gets a say. Pending orders reserve
-    #    budget too, otherwise two approved-but-unpaid orders can overshoot.
-    settings_row = db.get_settings()
-    cap = float(settings_row.get("monthly_cap_usd") or 0)
-    check = assess_cap(db, float(amount), cap)
-    if check.over_paid or check.over_reserved:
-        reason = (
-            hard_cap_reason(check.paid, cap)
-            if check.over_paid
-            else reserved_reason(check.committed, cap)
-        )
-        entry_id = db.add_entry(
+    # 3. the pot is the hard limit, in code, before the model gets a say
+    covered, balance = pot_covers(db, float(amount))
+    if not covered:
+        reason = pot_refusal_reason(balance, float(amount))
+        db.add_entry(
+            kind="request",
             raw_text=text,
             amount_usd=float(amount),
             category=category,
@@ -330,27 +411,30 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "item": item,
             "category": category,
             "status": "declined",
-            "ledger_id": entry_id,
         }
 
     # 4. the model argues
+    settings_row = db.get_settings()
     verdict = await brain.decide(
         rules=settings_row.get("rules", ""),
         ledger_lines=[_ledger_line(entry) for entry in db.since(30)],
         today=today_iso(),
         request_text=text,
         parsed=parsed,
+        pot_balance=balance,
     )
 
     # 5. decline / ask stop here
     if verdict["decision"] in {"decline", "ask"}:
-        entry_id = db.add_entry(
+        status = "declined" if verdict["decision"] == "decline" else "ask"
+        db.add_entry(
+            kind="request",
             raw_text=text,
             amount_usd=float(amount),
             category=verdict["category"],
             decision=verdict["decision"],
             reason=verdict["reason"],
-            status="declined",
+            status=status,
         )
         return {
             "decision": verdict["decision"],
@@ -358,81 +442,93 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "amount": float(amount),
             "item": item,
             "category": verdict["category"],
-            "status": "declined",
-            "ledger_id": entry_id,
+            "status": status,
         }
 
-    # 6. approved -> PayPal order -> pending row -> buyer link
-    order_id, approve_url = await state.paypal.create_order(float(amount), text)
-    entry_id = db.add_entry(
+    # 6. approved -> put the money back in the user's hands
+    recipient = settings_row.get("recipient_email") or state.settings.recipient_email
+    request_id, release_id = db.add_request_with_release(
         raw_text=text,
         amount_usd=float(amount),
         category=verdict["category"],
-        decision="approve",
         reason=verdict["reason"],
-        status="pending",
-        paypal_order_id=order_id,
     )
-    return {
+    sender_batch_id = f"hubby-{release_id}-{int(time.time())}"
+    try:
+        batch_id = await state.paypal.create_payout(
+            recipient_email=recipient,
+            amount_usd=float(amount),
+            note=item,
+            subject=f"Hubby released {money(amount)}",
+            sender_batch_id=sender_batch_id,
+        )
+    except PayPalError as exc:
+        db.mark_release(release_id, status="failed", reason=f"{exc.name}: {exc}")
+        return {
+            "decision": "approve",
+            "reason": verdict["reason"],
+            "amount": float(amount),
+            "item": item,
+            "category": verdict["category"],
+            "status": "failed",
+            "error": f"Payout failed: {exc}",
+            "request_id": request_id,
+        }
+
+    status, payout = await state.paypal.wait_for_payout(
+        batch_id,
+        attempts=state.settings.payout_poll_attempts,
+        interval=state.settings.payout_poll_interval,
+    )
+    item_id = (payout or {}).get("payout_item_id")
+    transaction_id = (payout or {}).get("transaction_id")
+    if status == "released":
+        db.mark_release(
+            release_id,
+            status="released",
+            batch_id=batch_id,
+            item_id=item_id,
+            transaction_id=transaction_id,
+            reason=f"released to {recipient}",
+            mark_paid_at=True,
+        )
+    elif status == "failed":
+        db.mark_release(
+            release_id,
+            status="failed",
+            batch_id=batch_id,
+            reason=payout_error_message(payout or {}) or "payout failed",
+        )
+    elif status == "unclaimed":
+        db.mark_release(
+            release_id,
+            status="unclaimed",
+            batch_id=batch_id,
+            reason="recipient has no PayPal account for that email",
+        )
+    else:
+        db.mark_release(
+            release_id,
+            status="pending",
+            batch_id=batch_id,
+            reason="PayPal is still processing this payout",
+        )
+
+    result: dict[str, Any] = {
         "decision": "approve",
         "reason": verdict["reason"],
         "amount": float(amount),
         "item": item,
         "category": verdict["category"],
-        "status": "pending",
-        "approve_url": approve_url,
-        "order_id": order_id,
-        "ledger_id": entry_id,
+        "status": status,
+        "payout_batch_id": batch_id,
+        "request_id": request_id,
     }
-
-
-# -- paypal return legs ----------------------------------------------------
-@app.get("/paypal/return")
-async def paypal_return(request: Request, token: str = ""):
-    db: Database = request.app.state.db
-    entry = db.by_order_id(token) if token else None
-    if not entry:
-        return _flash_redirect("PayPal came back with an order I don't know about.")
-
-    if entry["status"] == "paid":
-        tip = f" · capture {entry['paypal_capture_id']}" if entry.get("paypal_capture_id") else ""
-        return _flash_redirect(f"This one is already paid ({money(entry.get('amount_usd'))}){tip}.")
-
-    if entry["status"] != "pending":
-        return _flash_redirect(f"That order is {entry['status']}; nothing was captured.")
-
-    # Second cap check: the rules may have changed between approval and payment.
-    settings_row = db.get_settings()
-    cap = float(settings_row.get("monthly_cap_usd") or 0)
-    amount = float(entry.get("amount_usd") or 0)
-    paid_now = db.month_paid_usd()
-    if round(paid_now + amount, 2) > round(cap, 2):
-        reason = hard_cap_reason(paid_now, cap) + " — refused at capture; authorization left uncaptured"
-        db.mark_capture_failed(entry["id"], reason)
-        return _flash_redirect(
-            f"Capture refused. {hard_cap_reason(paid_now, cap)} — nothing was charged."
-        )
-
-    try:
-        capture_id = await request.app.state.paypal.capture(token)
-    except PayPalError as exc:
-        db.mark_capture_failed(entry["id"], f"{exc.name}: {exc}")
-        return _flash_redirect(f"Capture failed: {exc}")
-
-    db.mark_paid(entry["id"], capture_id)
-    return _flash_redirect(
-        f"Paid {money(entry.get('amount_usd'))} · capture {capture_id[:10]}…"
-    )
-
-
-@app.get("/paypal/cancel")
-async def paypal_cancel(request: Request, token: str = ""):
-    db: Database = request.app.state.db
-    entry = db.by_order_id(token) if token else None
-    if entry and entry["status"] == "pending":
-        db.mark_cancelled(entry["id"])
-        return _flash_redirect("Cancelled at PayPal. Nothing was charged.")
-    return _flash_redirect("Cancelled. Nothing was charged.")
+    if item_id:
+        result["payout_item_id"] = item_id
+    if status == "failed":
+        result["error"] = payout_error_message(payout or {}) or "payout failed"
+    return result
 
 
 @app.get("/healthz")

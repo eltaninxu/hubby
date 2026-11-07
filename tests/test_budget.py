@@ -1,4 +1,4 @@
-from app.budget import cap_label, hard_cap_reason, money
+from app.budget import money, pot_refusal_reason
 
 
 def test_money_format():
@@ -7,11 +7,6 @@ def test_money_format():
     assert money(None) == "--"
 
 
-def test_cap_label_matches_demo_copy():
-    assert cap_label(7) == "$7"
-    assert cap_label(120) == "$120"
-
-
-def test_hard_cap_reason_is_fixed_text():
-    assert hard_cap_reason(11.7, 7) == "Hard cap: $11.70 of $7 used this month"
-    assert hard_cap_reason(5.7, 120) == "Hard cap: $5.70 of $120 used this month"
+def test_pot_refusal_reason_is_fixed_text():
+    assert pot_refusal_reason(0, 6) == "Pot has $0.00, you asked for $6.00. Fund it first."
+    assert pot_refusal_reason(14, 15) == "Pot has $14.00, you asked for $15.00. Fund it first."

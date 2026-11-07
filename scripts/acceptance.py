@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Acceptance run for SPEC section 9, driven by a real browser and real PayPal sandbox.
+"""Acceptance run for SPEC v2 section 9, with a real browser and PayPal sandbox.
 
     HUBBY_BASE=https://hubby.royola.dev \
     PAYPAL_SANDBOX_PERSONAL_EMAIL=... PAYPAL_SANDBOX_PERSONAL_PASSWORD=... \
     HUBBY_ACCEPT_DB=data/hubby.db \
     .venv/bin/python scripts/acceptance.py
 
-Writes screenshots and report.md into evidence/acceptance/.
+The demo database must be fresh (pot $0.00). Writes screenshots and report.md
+into evidence/acceptance-v2/.
 
-Two things this script cannot prove, and the report says so:
+Not automated here, and stated in the report:
   * item 1's clean `git clone` + `compose up` (see scripts/clone_check.sh)
   * item 8's human read-through of the README
+  * item 10's restart-idempotency (needs a restart mid-run)
+  * the personal account's Activity page (manual glance)
 """
 
 from __future__ import annotations
@@ -22,18 +25,19 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from playwright.async_api import Page, async_playwright
 
-BASE = os.environ.get("HUBBY_BASE", "http://localhost:8086").rstrip("/")
-DB_PATH = pathlib.Path(os.environ.get("HUBBY_ACCEPT_DB", ".dev/data/hubby.db"))
-OUT = pathlib.Path("evidence/acceptance")
+BASE = os.environ.get("HUBBY_BASE", "http://localhost:8080").rstrip("/")
+DB_PATH = pathlib.Path(os.environ.get("HUBBY_ACCEPT_DB", "data/hubby.db"))
+OUT = pathlib.Path("evidence/acceptance-v2")
 
 RESULTS: list[tuple[str, bool, str]] = []
 
-# Assembled at runtime so this file itself never contains key-looking text.
+# Assembled at runtime so this file never contains key-looking text.
 SECRET_RE = re.compile("s" + "k-" + r"|EL[A-Za-z0-9_-]{60,}|BAA" + "2")
 SECRET_RE_HISTORY = re.compile(
     "s" + "k-" + r"[A-Za-z0-9_-]{20,}|EL[A-Za-z0-9_-]{60,}|BAA" + "2" + r"[A-Za-z0-9_-]{20,}"
@@ -51,63 +55,41 @@ def db_conn() -> sqlite3.Connection:
     return conn
 
 
-def db_rows(limit: int = 5) -> list[sqlite3.Row]:
+def rows(where: str = "", args: tuple = ()) -> list[sqlite3.Row]:
     with db_conn() as conn:
-        return list(conn.execute("SELECT * FROM ledger ORDER BY id DESC LIMIT ?", (limit,)))
+        return list(conn.execute(f"SELECT * FROM ledger {where}", args))
 
 
-def row_for(text: str) -> sqlite3.Row | None:
-    """Find the row for exactly this request, not just the newest row.
-
-    Browser navigation can leave a stray submit in the ledger; asserting on
-    "the last row" turns that into a false failure.
-    """
+def pot() -> float:
     with db_conn() as conn:
-        return conn.execute(
-            "SELECT * FROM ledger WHERE raw_text = ? ORDER BY id DESC LIMIT 1", (text,)
+        row = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN kind='deposit' AND status='paid' THEN amount_usd END),0)"
+            " - COALESCE(SUM(CASE WHEN kind='release' AND status IN ('released','pending')"
+            " THEN amount_usd END),0) AS b FROM ledger"
         ).fetchone()
-
-
-def month_paid() -> float:
-    prefix = datetime.now(timezone.utc).strftime("%Y-%m") + "%"
-    with db_conn() as conn:
-        total, = conn.execute(
-            "SELECT COALESCE(SUM(amount_usd), 0) FROM ledger"
-            " WHERE status = 'paid' AND paid_at LIKE ?",
-            (prefix,),
-        ).fetchone()
-    return round(float(total), 2)
+    return round(float(row["b"]), 2)
 
 
 def seed_day(name: str) -> str | None:
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT paid_at FROM ledger WHERE raw_text = ? AND reason LIKE 'Seeded example:%'"
-            " ORDER BY id LIMIT 1",
+            "SELECT paid_at FROM ledger WHERE raw_text = ? AND reason = 'seed' ORDER BY id LIMIT 1",
             (name,),
         ).fetchone()
     return row["paid_at"][:10] if row else None
-
-
-async def reset_cap(http: httpx.AsyncClient, cap: float) -> None:
-    """Go through the app, not the DB: the DB belongs to the container user."""
-    with db_conn() as conn:
-        row = conn.execute("SELECT rules FROM settings WHERE id = 1").fetchone()
-    rules = row["rules"] if row else "Be reasonable."
-    await http.post("/settings", data={"rules": rules, "monthly_cap_usd": f"{cap:.2f}"})
 
 
 async def shot(page: Page, name: str) -> None:
     await page.screenshot(path=str(OUT / f"{name}.png"), full_page=True)
 
 
-async def say(page: Page, text: str) -> str:
+async def say(page: Page, text: str, timeout: int = 120_000) -> str:
     await page.fill("#text", text)
     await page.press("#text", "Enter")
     await page.wait_for_function(
-        "() => !document.getElementById('text').disabled", timeout=120_000
+        "() => !document.getElementById('text').disabled", timeout=timeout
     )
-    await page.wait_for_timeout(300)
+    await page.wait_for_timeout(400)
     return await page.locator(".msg.hubby").last.inner_text()
 
 
@@ -123,45 +105,49 @@ async def login_if_needed(page: Page) -> None:
     await page.wait_for_timeout(9_000)
 
 
-async def open_paypal(page: Page, context):
+async def wait_for_pot(page: Page, expected: float, timeout: float = 180) -> bool:
+    """The page reloads itself while funding settles; survive the navigation."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            text = (await page.locator("#pot-value").inner_text()).strip()
+            if text == f"${expected:.2f}":
+                return True
+        except Exception:  # noqa: BLE001 - page may be reloading
+            pass
+        await page.wait_for_timeout(1_000)
+    return False
+
+
+async def fund_pot(page: Page, context, amount: float, *, cancel: bool = False) -> str:
+    """Use the UI: fill the fund form, pay (or cancel) in the PayPal popup."""
+    await page.fill("#fund-amount", str(amount))
     async with context.expect_page() as popup_info:
-        await page.locator("a.pay").last.click()
+        await page.click("#fund button[type=submit]")
     popup = await popup_info.value
     await popup.wait_for_load_state("domcontentloaded")
     await popup.wait_for_timeout(3_500)
     await login_if_needed(popup)
-    return popup
 
-
-async def pay_with_paypal(page: Page, context, name: str) -> str:
-    popup = await open_paypal(page, context)
-    await shot(popup, f"{name}-paypal")
-    for selector in (
-        "#payment-submit-btn",
-        "button:has-text('完成购物')",
-        "button:has-text('Complete Purchase')",
-        "button:has-text('Agree & Continue')",
-    ):
-        try:
-            await popup.click(selector, timeout=5_000)
-            break
-        except Exception:
-            continue
-    await popup.wait_for_url("**/*flash=*", timeout=60_000)
-    flash = await popup.locator(".flash").inner_text()
-    await popup.close()
-    return flash
-
-
-async def cancel_at_paypal(page: Page, context) -> str:
-    popup = await open_paypal(page, context)
-    for text in ("取消并返回Test Store", "Cancel and return to Test Store"):
-        try:
-            await popup.get_by_text(text, exact=False).first.click(timeout=4_000)
-            break
-        except Exception:
-            continue
-    await popup.wait_for_url("**/*flash=*", timeout=60_000)
+    if cancel:
+        for text in ("取消并返回Test Store", "Cancel and return to Test Store"):
+            try:
+                await popup.get_by_text(text, exact=False).first.click(timeout=4_000)
+                break
+            except Exception:
+                continue
+    else:
+        for selector in (
+            "#payment-submit-btn",
+            "button:has-text('完成购物')",
+            "button:has-text('Complete Purchase')",
+        ):
+            try:
+                await popup.click(selector, timeout=5_000)
+                break
+            except Exception:
+                continue
+    await popup.wait_for_url("**/*flash=*", timeout=90_000)
     flash = await popup.locator(".flash").inner_text()
     await popup.close()
     return flash
@@ -173,10 +159,16 @@ async def main() -> int:
         os.environ.get("PAYPAL_SANDBOX_PERSONAL_EMAIL")
         and os.environ.get("PAYPAL_SANDBOX_PERSONAL_PASSWORD")
     )
+
     async with httpx.AsyncClient(base_url=BASE, timeout=30) as http:
-        await reset_cap(http, 120)
         health = (await http.get("/healthz")).json()
         home = await http.get("/")
+        start_pot = (await http.get("/api/pot")).json()["pot"]
+        check(
+            "0. fresh demo database (pot is empty)",
+            start_pot == 0.0,
+            f"pot={start_pot}",
+        )
         check(
             "1. app is up (/healthz + home page)",
             health.get("ok") is True and home.status_code == 200,
@@ -191,130 +183,158 @@ async def main() -> int:
         await page.wait_for_timeout(500)
         await shot(page, "01-home")
 
-        # 2. bubble tea declined, citing the last cup and the 3 day rule
-        last_cup = seed_day("bubble tea")
-        await say(page, "bubble tea $4.50")
-        row = row_for("bubble tea $4.50")
+        # 2. empty pot: the code says no, the model is not asked
+        await say(page, "fried chicken drumstick $6")
+        row = rows("WHERE kind='request' ORDER BY id DESC LIMIT 1")[0]
         check(
-            "2. bubble tea declined, citing the last cup and 3 days",
+            "2. empty pot declines with the fixed text, before the model",
             row["decision"] == "decline"
-            and row["status"] == "declined"
-            and "3 day" in row["reason"]
-            and last_cup is not None
-            and last_cup in row["reason"],
-            row["reason"][:120],
+            and row["reason"] == "Pot has $0.00, you asked for $6.00. Fund it first."
+            and pot() == 0.0,
+            row["reason"],
         )
-        await shot(page, "02-bubble-tea")
+        await shot(page, "02-empty-pot")
 
-        # 3. fried chicken approved, paid for real
-        if personal_ready:
-            baseline = month_paid()
-            await say(page, "fried chicken drumstick $6")
-            approve_button = await page.locator("a.pay").count()
+        if not personal_ready:
+            check("3. fund the pot via PayPal", False, "no sandbox buyer credentials")
+        else:
+            # 3. fund the pot with a real PayPal order
+            try:
+                flash = await fund_pot(page, context, 20)
+                funded = await wait_for_pot(page, 20.0)
+                deposit = rows("WHERE kind='deposit' ORDER BY id DESC LIMIT 1")[0]
+                check(
+                    "3. fund the pot: paid, captured, pot is $20.00",
+                    "Pot funded +$20.00" in flash
+                    and funded
+                    and deposit["status"] == "paid"
+                    and bool(deposit["paypal_capture_id"]),
+                    f"{flash[:60]} · pot={pot():.2f}",
+                )
+                await shot(page, "03-funded")
+            except Exception as exc:  # noqa: BLE001
+                check("3. fund the pot via PayPal", False, str(exc)[:200])
+
+            # 4. approve releases money with a real payout
+            try:
+                reply = await say(page, "fried chicken drumstick $6", timeout=180_000)
+                await page.wait_for_timeout(500)
+                release = rows("WHERE kind='release' AND reason != 'seed' ORDER BY id DESC LIMIT 1")
+                request = rows("WHERE kind='request' ORDER BY id DESC LIMIT 1")[0]
+                check(
+                    "4a. approve released the money (payout id, released row)",
+                    bool(release)
+                    and release[0]["status"] == "released"
+                    and bool(release[0]["paypal_payout_item_id"])
+                    and request["status"] == "approved",
+                    f"{(release[0]['paypal_payout_item_id'] if release else None)}",
+                )
+                check(
+                    "4b. the pot dropped to $14.00",
+                    pot() == 14.0,
+                    f"pot={pot():.2f}",
+                )
+                check(
+                    "4c. the chat shows the release",
+                    "Released $6.00 to you" in reply,
+                    reply[:100].replace("\n", " | "),
+                )
+                await shot(page, "04-released")
+            except Exception as exc:  # noqa: BLE001
+                check("4a. approve released the money", False, str(exc)[:200])
+
+            # 5. rules still decline, with the rule and the ledger line quoted
+            last_cup = seed_day("bubble tea")
+            await say(page, "bubble tea $4.50")
+            row = rows("WHERE kind='request' ORDER BY id DESC LIMIT 1")[0]
             check(
-                "3a. fried chicken approved with a PayPal button",
-                approve_button > 0,
-                f"pay buttons on page: {approve_button}",
+                "5. bubble tea declined citing the last cup and 3 days",
+                row["decision"] == "decline"
+                and "3 day" in row["reason"]
+                and last_cup is not None
+                and last_cup in row["reason"],
+                row["reason"][:110],
             )
-            await shot(page, "03-chicken-approved")
+            await shot(page, "05-bubble-tea")
+
+            # 6. a question is not a payment
+            await say(page, "a cake")
+            row = rows("WHERE kind='request' ORDER BY id DESC LIMIT 1")[0]
+            check(
+                "6. 'a cake' asks how much, no payout",
+                row["decision"] == "ask" and "How much" in row["reason"],
+                row["reason"][:60],
+            )
+            await shot(page, "06-cake-ask")
+
+            # 7. the pot is the hard limit
+            await say(page, "lunch $15")
+            row = rows("WHERE kind='request' ORDER BY id DESC LIMIT 1")[0]
+            check(
+                "7. over-pot request declines with the fixed text",
+                row["decision"] == "decline"
+                and row["reason"] == "Pot has $14.00, you asked for $15.00. Fund it first.",
+                row["reason"],
+            )
+            await shot(page, "07-pot-limit")
+
+            # 7b. cancelling a funding leaves the pot alone
             try:
-                flash = await pay_with_paypal(page, context, "03-pay")
-                await page.goto(BASE + "/", wait_until="networkidle")
-                paid_row = row_for("fried chicken drumstick $6")
-                expected_total = round(baseline + 6.0, 2)
+                before = pot()
+                flash = await fund_pot(page, context, 5, cancel=True)
+                deposit = rows("WHERE kind='deposit' ORDER BY id DESC LIMIT 1")[0]
                 check(
-                    "3b. buyer paid, capture landed, ledger is paid",
-                    paid_row is not None
-                    and paid_row["status"] == "paid"
-                    and bool(paid_row["paypal_capture_id"])
-                    and month_paid() == expected_total,
-                    f"capture={paid_row['paypal_capture_id'] if paid_row else None}"
-                    f" month=${month_paid():.2f} baseline=${baseline:.2f}",
+                    "7b. cancelled funding: deposit cancelled, pot unchanged",
+                    deposit["status"] == "cancelled" and pot() == before and "cancelled" in flash.lower(),
+                    f"{flash[:50]} · pot={pot():.2f}",
                 )
-                check(
-                    "3c. flash shows Paid and the capture id",
-                    paid_row is not None
-                    and bool(paid_row["paypal_capture_id"])
-                    and "Paid" in flash
-                    and paid_row["paypal_capture_id"][:10] in flash,
-                    flash[:80],
-                )
-                await shot(page, "03-paid")
+                await shot(page, "07b-cancel-funding")
             except Exception as exc:  # noqa: BLE001
-                check("3b. buyer paid, capture landed, ledger is paid", False, str(exc)[:200])
-        else:
-            check("3. fried chicken approved and paid", False, "no sandbox buyer credentials")
+                check("7b. cancelled funding", False, str(exc)[:200])
 
-        # 4. "a cake" asks for the price and never builds an order
-        await say(page, "a cake")
-        row = row_for("a cake")
-        check(
-            "4. 'a cake' asks how much, no order",
-            row["decision"] == "ask"
-            and "How much" in row["reason"]
-            and row["paypal_order_id"] is None,
-            row["reason"][:80],
-        )
-        await shot(page, "04-cake-ask")
-
-        # 5. hard cap, straight from code
-        await page.goto(BASE + "/settings", wait_until="networkidle")
-        await page.fill("input[name=monthly_cap_usd]", "7")
-        await page.click("button[type=submit]")
-        await page.wait_for_timeout(800)
-        await page.goto(BASE + "/", wait_until="networkidle")
-        await say(page, "lunch $8")
-        row = row_for("lunch $8")
-        paid_now = month_paid()
-        expected = f"Hard cap: ${paid_now:.2f} of $7 used this month"
-        check(
-            "5. hard cap declines with fixed code text",
-            row["decision"] == "decline" and row["reason"] == expected,
-            f"got {row['reason']!r}",
-        )
-        await shot(page, "05-hard-cap")
-
-        # back to a sane cap so the next check tests the rules, not the cap
-        await page.goto(BASE + "/settings", wait_until="networkidle")
-        await page.fill("input[name=monthly_cap_usd]", "120")
-        await page.click("button[type=submit]")
-        await page.wait_for_timeout(800)
-        await page.goto(BASE + "/", wait_until="networkidle")
-
-        # 6. one sweet thing per day
-        await say(page, "dessert $5")
-        row = row_for("dessert $5")
-        check(
-            "6. dessert declined citing one sweet thing per day",
-            row["decision"] == "decline" and "One sweet thing per day" in row["reason"],
-            row["reason"][:110],
-        )
-        await shot(page, "06-dessert")
-
-        # 7. buyer cancels at PayPal
-        if personal_ready:
-            await say(page, "coffee $3")
-            before = month_paid()
+            # 7c. a payout to an email with no PayPal account is not "released"
             try:
-                flash = await cancel_at_paypal(page, context)
-                await page.goto(BASE + "/", wait_until="networkidle")
-                row = row_for("coffee $3")
+                settings = {}
+                async with httpx.AsyncClient(base_url=BASE, timeout=30) as http:
+                    rules = ""
+                    with db_conn() as conn:
+                        row = conn.execute("SELECT rules FROM settings WHERE id=1").fetchone()
+                        rules = row["rules"] if row else ""
+                    bogus = f"nobody-{int(time.time())}@example.com"
+                    await http.post(
+                        "/settings", data={"rules": rules, "recipient_email": bogus}
+                    )
+                reply = await say(page, "gum $1", timeout=180_000)
+                release = rows("WHERE kind='release' ORDER BY id DESC LIMIT 1")[0]
                 check(
-                    "7. cancel leaves the row cancelled and the month total unchanged",
-                    row["status"] == "cancelled"
-                    and month_paid() == before
-                    and "Cancelled" in flash,
-                    f"status={row['status']} month=${month_paid():.2f}",
+                    "7c. payout to a dead email is unclaimed or pending, never released",
+                    release["status"] in {"unclaimed", "pending"},
+                    release["status"],
                 )
-                await shot(page, "07-cancelled")
+                # put the real recipient back
+                async with httpx.AsyncClient(base_url=BASE, timeout=30) as http:
+                    await http.post(
+                        "/settings",
+                        data={
+                            "rules": rules,
+                            "recipient_email": os.environ["PAYPAL_SANDBOX_PERSONAL_EMAIL"],
+                        },
+                    )
+                await shot(page, "07c-unclaimed")
             except Exception as exc:  # noqa: BLE001
-                check(
-                    "7. cancel leaves the row cancelled and the month total unchanged",
-                    False,
-                    str(exc)[:200],
-                )
-        else:
-            check("7. cancel flow", False, "no sandbox buyer credentials")
+                check("7c. payout to a dead email", False, str(exc)[:200])
+
+            # 10. one release row per approved request, no double payouts
+            with db_conn() as conn:
+                dupes = conn.execute(
+                    "SELECT request_id, COUNT(*) n FROM ledger WHERE kind='release'"
+                    " AND request_id IS NOT NULL GROUP BY request_id HAVING n > 1"
+                ).fetchall()
+            check(
+                "10. every approved request has at most one release row",
+                not dupes,
+                f"duplicates={[dict(d) for d in dupes]}",
+            )
 
         await page.goto(BASE + "/ledger", wait_until="networkidle")
         await shot(page, "08-ledger")
@@ -326,13 +346,10 @@ async def main() -> int:
         ["git", "ls-files", "-z"], capture_output=True, text=True, timeout=60
     ).stdout.split("\0")
     for name in tracked:
-        if not name:
-            continue
-        path = pathlib.Path(name)
-        if path.suffix in {".png", ".db", ".whl"}:
+        if not name or pathlib.Path(name).suffix in {".png", ".db", ".whl"}:
             continue
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = pathlib.Path(name).read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         if SECRET_RE.search(text):
@@ -359,7 +376,7 @@ async def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [
-        "# Acceptance run",
+        "# Acceptance run (v2: Hubby holds the money)",
         "",
         f"- when: {stamp}",
         f"- target: {BASE}",
@@ -373,11 +390,13 @@ async def main() -> int:
     lines += [
         "",
         "Not automated here:",
-        "- **item 1 (clean clone + compose up)** — see `scripts/clone_check.sh` and its output.",
-        "- **item 8 (README walk-through by a human)** — still needs a person who has never",
-        "  seen this project to follow the README end to end.",
-        "- **PayPal seller dashboard** — the capture id in the ledger is the evidence; checking",
-        "  the seller dashboard is a manual glance.",
+        "- **item 1 (clean clone + compose up)** — `scripts/clone_check.sh`,",
+        "- **item 8 (README walk-through by a human)** — still needs a person who has",
+        "  never seen this project,",
+        "- **item 10 restart half** — no payout is re-sent after a restart because nothing",
+        "  re-sends payouts at all; the duplicate-row check above is the automated half,",
+        "- **personal account Activity page** — the payout transaction ids are the evidence;",
+        "  a glance at the sandbox buyer's Activity is manual.",
     ]
     (OUT / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

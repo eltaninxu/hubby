@@ -5,11 +5,11 @@
   <section class="chat">
     <div class="messages" id="messages">
       <div class="msg hubby">
-        <div class="bubble">Tell me what you want to buy. I'll check it against the rules and this month's budget.</div>
+        <div class="bubble">Ask me before you buy. I'll check the house rules and release the money from the pot if it's a yes.</div>
       </div>
     </div>
     <form class="composer" id="composer">
-      <input id="text" name="text" placeholder='try "bubble tea $4.50"' autocomplete="off" autofocus>
+      <input id="text" name="text" placeholder='try "fried chicken drumstick $6"' autocomplete="off" autofocus>
       <button type="submit" id="send">Send</button>
     </form>
   </section>
@@ -17,27 +17,33 @@
   <aside class="sidebar">
     <div class="card">
       <div class="card-head">
-        <span>This month</span>
-        <strong class="{{ 'bad' if budget.over else '' }}">{{ money(budget.used) }} <span class="muted">of {{ cap_label(budget.cap) }}</span></strong>
+        <span>Pot</span>
+        <strong id="pot-value" data-pot="{{ '%.2f'|format(pot.pot) }}">{{ money(pot.pot) }}</strong>
       </div>
-      <div class="bar"><div class="fill {{ 'bad' if budget.over else '' }}" style="width: {{ budget.percent }}%"></div></div>
+      <p class="hint">Money stays in Hubby's PayPal account until it says yes.</p>
+      <form class="fund" id="fund">
+        <input id="fund-amount" type="number" min="1" step="1" value="20" aria-label="amount to fund">
+        <button type="submit">Fund the pot</button>
+      </form>
       <ul class="totals">
-        {% for row in budget.categories %}
-          <li><span>{{ row.category }}</span><span>{{ money(row.total) }}</span></li>
-        {% else %}
-          <li class="muted">nothing paid yet this month</li>
+        <li><span>deposited this month</span><span>{{ money(pot.deposits) }}</span></li>
+        <li><span>released this month</span><span>{{ money(pot.releases) }}</span></li>
+        {% for row in pot.categories %}
+          <li class="sub"><span>{{ row.category }}</span><span>{{ money(row.total) }}</span></li>
         {% endfor %}
       </ul>
     </div>
 
     <div class="card">
-      <div class="card-head"><span>Last 5</span><a class="small" href="/ledger">ledger</a></div>
+      <div class="card-head"><span>Last 6</span><a class="small" href="/ledger">ledger</a></div>
       <ul class="mini">
         {% for e in recent %}
           <li>
-            <span class="dot {{ e.status }}"></span>
+            <span class="dot {{ e.kind }} {{ e.status }}"></span>
             <span class="mini-text">{{ e.raw_text }}</span>
-            <span class="mini-amount">{{ money(e.amount_usd) }}</span>
+            <span class="mini-amount">
+              {% if e.kind == "deposit" %}+{% elif e.kind == "release" %}−{% endif %}{{ money(e.amount_usd) }}
+            </span>
           </li>
         {% else %}
           <li class="muted">empty</li>

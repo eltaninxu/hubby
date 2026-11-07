@@ -48,6 +48,29 @@ def _error_from(response: httpx.Response, fallback: str) -> PayPalError:
     )
 
 
+def payout_status(item: dict[str, Any]) -> str:
+    """Map PayPal's transaction_status onto our release statuses."""
+    status = str(item.get("transaction_status") or "").upper()
+    if status == "SUCCESS":
+        return "released"
+    if status in {"FAILED", "BLOCKED", "DENIED", "RETURNED"}:
+        return "failed"
+    if status == "UNCLAIMED":
+        return "unclaimed"
+    return "pending"
+
+
+def payout_error_message(item: dict[str, Any]) -> str | None:
+    errors = item.get("errors")
+    if isinstance(errors, dict) and errors.get("message"):
+        return str(errors["message"])
+    if isinstance(errors, list) and errors:
+        first = errors[0]
+        if isinstance(first, dict):
+            return str(first.get("message") or first.get("name") or "")
+    return None
+
+
 class PayPalClient:
     def __init__(
         self,
@@ -178,6 +201,76 @@ class PayPalClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise PayPalError("capture response had no capture id") from exc
         return capture_id
+
+    # -- payouts ------------------------------------------------------------
+    async def create_payout(
+        self,
+        *,
+        recipient_email: str,
+        amount_usd: float,
+        note: str,
+        subject: str,
+        sender_batch_id: str,
+    ) -> str:
+        """Send money out of the pot. Returns the payout batch id."""
+        payload = {
+            "sender_batch_header": {
+                "sender_batch_id": sender_batch_id,
+                "email_subject": subject,
+            },
+            "items": [
+                {
+                    "recipient_type": "EMAIL",
+                    "receiver": recipient_email,
+                    "amount": {"value": f"{amount_usd:.2f}", "currency": "USD"},
+                    "note": note[:127],
+                    "sender_item_id": sender_batch_id,
+                }
+            ],
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.api_base}/v1/payments/payouts",
+                json=payload,
+                headers=await self._headers(client),
+            )
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            if response.status_code not in (200, 201):
+                raise _error_from(response, "could not create the payout")
+        batch_id = (body.get("batch_header") or {}).get("payout_batch_id")
+        if not batch_id:
+            raise PayPalError("payout response had no payout_batch_id")
+        return batch_id
+
+    async def get_payout(self, batch_id: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.get(
+                f"{self.api_base}/v1/payments/payouts/{batch_id}",
+                headers=await self._headers(client),
+            )
+            if response.status_code != 200:
+                raise _error_from(response, "could not read the payout")
+            return response.json()
+
+    async def wait_for_payout(
+        self, batch_id: str, *, attempts: int = 30, interval: float = 1.5
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Poll until the payout reaches a final status or the window closes."""
+        item: dict[str, Any] | None = None
+        status = "pending"
+        for attempt in range(max(1, attempts)):
+            body = await self.get_payout(batch_id)
+            items = body.get("items") or []
+            item = items[0] if items else None
+            status = payout_status(item or {})
+            if status != "pending":
+                break
+            if attempt + 1 < attempts:
+                await asyncio.sleep(interval)
+        return status, item
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:

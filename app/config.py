@@ -44,13 +44,16 @@ class Settings:
     openai_api_key: str
     openai_base_url: str | None
     llm_model: str
-    monthly_cap_usd: float
+    recipient_email: str
+    payout_poll_attempts: int
+    payout_poll_interval: float
     db_path: Path
     llm_stub: bool
     demo_reset: bool
     demo_reset_after_hours: float
     maintenance_seconds: float
     rate_api: tuple[int, int]
+    rate_fund: tuple[int, int]
     rate_settings: tuple[int, int]
     rate_global: tuple[int, int]
 
@@ -108,13 +111,12 @@ def load_settings(*, require_llm: bool = True) -> Settings:
             "endpoint actually serves and that supports tool calling."
         )
 
-    cap_raw = _env("MONTHLY_CAP_USD", default="120")
-    try:
-        monthly_cap = float(cap_raw)
-    except ValueError as exc:
-        raise ConfigError(f"MONTHLY_CAP_USD={cap_raw!r} is not a number.") from exc
-    if monthly_cap <= 0:
-        raise ConfigError(f"MONTHLY_CAP_USD must be positive, got {cap_raw!r}.")
+    recipient_email = _env("HUBBY_RECIPIENT_EMAIL", "PAYPAL_SANDBOX_PERSONAL_EMAIL")
+    if require_llm and not recipient_email:
+        raise ConfigError(
+            "Missing required env var: HUBBY_RECIPIENT_EMAIL. "
+            "It is the PayPal address approved money is released to."
+        )
 
     db_path = Path(_env("HUBBY_DB", default=str(ROOT / "data" / "hubby.db")))
 
@@ -134,13 +136,16 @@ def load_settings(*, require_llm: bool = True) -> Settings:
         openai_api_key=api_key,
         openai_base_url=_env("OPENAI_BASE_URL") or None,
         llm_model=llm_model,
-        monthly_cap_usd=monthly_cap,
+        recipient_email=recipient_email,
+        payout_poll_attempts=max(1, int(number("PAYOUT_POLL_ATTEMPTS", "30"))),
+        payout_poll_interval=max(0.0, number("PAYOUT_POLL_INTERVAL", "1.5")),
         db_path=db_path,
         llm_stub=_env("LLM_STUB", default="").lower() in {"1", "true", "yes"},
         demo_reset=_env("HUBBY_DEMO_RESET", default="0").lower() in {"1", "true", "yes"},
         demo_reset_after_hours=number("HUBBY_DEMO_RESET_AFTER_HOURS", "12"),
         maintenance_seconds=max(30.0, number("HUBBY_MAINTENANCE_SECONDS", "1800")),
         rate_api=parse_limit(_env("RATE_LIMIT_API", default="40/600"), default_limit=40, default_window=600),
+        rate_fund=parse_limit(_env("RATE_LIMIT_FUND", default="10/600"), default_limit=10, default_window=600),
         rate_settings=parse_limit(_env("RATE_LIMIT_SETTINGS", default="10/3600"), default_limit=10, default_window=3600),
         rate_global=parse_limit(_env("RATE_LIMIT_GLOBAL", default="600/3600"), default_limit=600, default_window=3600),
     )

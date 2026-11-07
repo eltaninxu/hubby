@@ -4,19 +4,19 @@
 <div class="page">
   <div class="summary">
     <div class="card">
-      <div class="card-head">
-        <span>This month</span>
-        <strong class="{{ 'bad' if budget.over else '' }}">{{ money(budget.used) }} <span class="muted">of {{ cap_label(budget.cap) }}</span></strong>
-      </div>
-      <div class="bar"><div class="fill {{ 'bad' if budget.over else '' }}" style="width: {{ budget.percent }}%"></div></div>
+      <div class="card-head"><span>Pot</span><strong>{{ money(pot.pot) }}</strong></div>
+      <ul class="totals">
+        <li><span>deposited this month</span><span>{{ money(pot.deposits) }}</span></li>
+        <li><span>released this month</span><span>{{ money(pot.releases) }}</span></li>
+      </ul>
     </div>
     <div class="card">
-      <div class="card-head"><span>By category</span></div>
+      <div class="card-head"><span>Released by category</span></div>
       <ul class="totals">
-        {% for row in budget.categories %}
+        {% for row in pot.categories %}
           <li><span>{{ row.category }}</span><span>{{ money(row.total) }}</span></li>
         {% else %}
-          <li class="muted">nothing paid yet this month</li>
+          <li class="muted">nothing released this month</li>
         {% endfor %}
       </ul>
     </div>
@@ -25,7 +25,7 @@
   <table class="ledger">
     <thead>
       <tr>
-        <th>When</th><th>Request</th><th class="num">Amount</th><th>Category</th>
+        <th>When</th><th>Kind</th><th>Request</th><th class="num">Amount</th><th>Category</th>
         <th>Decision</th><th>Reason</th><th>PayPal</th><th>Status</th>
       </tr>
     </thead>
@@ -33,22 +33,29 @@
       {% for e in entries %}
       <tr>
         <td class="nowrap muted">{{ (e.paid_at or e.created_at)[:16].replace("T", " ") }}</td>
+        <td><span class="kind {{ e.kind }}">{{ e.kind }}</span></td>
         <td>{{ e.raw_text }}</td>
-        <td class="num">{{ money(e.amount_usd) }}</td>
+        <td class="num">
+          {% if e.kind == "deposit" %}+{% elif e.kind == "release" %}−{% endif %}{{ money(e.amount_usd) }}
+        </td>
         <td>{{ e.category or "—" }}</td>
-        <td><span class="pill {{ e.decision }}">{{ e.decision }}</span></td>
+        <td>{% if e.decision %}<span class="pill {{ e.decision }}">{{ e.decision }}</span>{% else %}—{% endif %}</td>
         <td class="reason">{{ e.reason or "—" }}</td>
         <td class="ids">
           {% if e.paypal_capture_id %}
             <span title="capture id">{{ e.paypal_capture_id }}</span>
+          {% elif e.paypal_payout_item_id %}
+            <span title="payout item id">{{ e.paypal_payout_item_id }}</span>
           {% elif e.paypal_order_id %}
             <span class="muted" title="order id">{{ e.paypal_order_id }}</span>
+          {% elif e.paypal_payout_batch_id %}
+            <span class="muted" title="payout batch id">{{ e.paypal_payout_batch_id }}</span>
           {% else %}—{% endif %}
         </td>
         <td><span class="status {{ e.status }}">{{ e.status }}</span></td>
       </tr>
       {% else %}
-      <tr><td colspan="8" class="muted empty">No requests yet.</td></tr>
+      <tr><td colspan="9" class="muted empty">No entries yet.</td></tr>
       {% endfor %}
     </tbody>
   </table>

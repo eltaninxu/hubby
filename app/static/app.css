@@ -251,3 +251,60 @@ table.ledger {
   .layout, .summary { grid-template-columns: 1fr; }
   .chat { max-height: none; }
 }
+
+/* --- v2: the pot --- */
+.fund { display: flex; gap: 8px; margin: 10px 0 12px; }
+.fund input {
+  width: 86px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font: inherit;
+  background: #fff;
+}
+.fund button { padding: 8px 14px; font-size: 14px; border-radius: 9px; }
+
+.totals .sub { padding-left: 12px; color: var(--muted); font-size: 12.5px; }
+
+.dot.deposit { background: #2f6f9f; }
+.dot.release { background: var(--good); }
+.dot.request { background: #b9b2a6; }
+.dot.declined { background: var(--bad); }
+.dot.pending { background: #c99a2e; }
+.dot.failed { background: var(--bad); }
+.dot.released { background: var(--good); }
+.dot.paid { background: #2f6f9f; }
+
+.payout { margin-top: 8px; font-size: 14px; font-weight: 600; }
+.payout.ok { color: var(--good); }
+.payout.wait { color: var(--warn); }
+.payout.bad { color: var(--bad); }
+
+.kind {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+.kind.request { background: #f0ece4; color: #5b564e; }
+.kind.deposit { background: #e6eef6; color: #2f6f9f; }
+.kind.release { background: var(--good-bg); color: var(--good); }
+
+.status.released { background: var(--good-bg); color: var(--good); }
+.status.released,
+.status.paid { background: var(--good-bg); color: var(--good); }
+.status.ask { background: var(--warn-bg); color: var(--warn); }
+.status.approved { background: #e6eef6; color: #2f6f9f; }
+.status.failed, .status.unclaimed { background: var(--bad-bg); color: var(--bad); }
+
+.form .email {
+  width: 100%;
+  max-width: 340px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font: inherit;
+  background: #fff;
+}
