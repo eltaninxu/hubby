@@ -3,6 +3,121 @@
 > PayPal AI Hackathon(Devpost)参赛项目规格。写给跑腿的:照这份做,做完按第 9 节验收,验收过了交给 Eltanin 推仓库、配视频。
 > 截止:2026-11-12 12:00 PT = 成都 2026-11-13 04:00。留 11/12 整天给视频和 Devpost 文案,代码 11/11 晚必须冻结。
 
+---
+
+## v2 变更(2026-11-07 晚,Royola 拍板):Hubby holds the money
+
+v1 已经做完并上线(https://hubby.royola.dev,commit `bde7a46`),验收 10/10。但 v1 的钱走向有个说不圆的地方:批了之后用户付 $6 给 **Hubby 的商户号**,可 Hubby 不是卖东西的,PayPal 在里面只是个收据机。评委问一句"这跟 PayPal 有啥关系"就站不住。
+
+**v2 把钱的方向反过来:钱先锁在 Hubby 手里,用户一笔一笔问它要。**
+
+- 月初(或任何时候)用户往 Hubby 的 PayPal 账户里充钱 = **Fund the pot**(复用 v1 已做好的 Orders 建单 → 买家确认 → capture,一行逻辑不用改,只换文案和账本类型)。
+- 之后每次想买东西问 Hubby;**批了,Hubby 用 Payouts 把正好那个金额打回用户的 PayPal**,用户拿着去任何地方买;拒了,一分钱不动。
+- 硬顶从数据库里的一个数字变成 **pot 的真实余额**:没钱就是打不出去。
+- 一句话:*The LLM argues, the code enforces, and the money never leaves PayPal until Hubby says yes.*
+
+以下只写 v2 相对 v1 的差异;没提到的部分沿用下面 v1 原文和现有代码。
+
+### v2.1 范围差异
+
+**改:**
+
+1. `approve` 的动作:v1 是"建单返回 approve_url";v2 是"调 Payouts 给 `recipient_email` 打 `amount_usd`",同步等结果(见 v2.3),账本写 `release`。
+2. 硬顶:v1 是"本月 paid 合计 + 本次 > 月预算";v2 是 **`pot_balance < amount_usd`** → `decline`,理由固定格式 `Pot has $X.XX, you asked for $Y.YY. Fund it first.`,不经 LLM。`pot_balance` 按账本算:`sum(deposit 且 status=paid)` − `sum(release 且 status ∈ {released, pending})`。
+3. v1 的 Orders 流程**保留**,改名 **Fund the pot**:首页一个输入框 + 按钮(金额,默认 20),走原来的 create → approve_url → return/capture → 账本写 `deposit`,status `paid`;cancel → `cancelled`。
+4. `MONTHLY_CAP_USD` 去掉(env、settings 页、种子、README 全删)。预算就是 pot 里有多少钱。
+5. 新增 env `HUBBY_RECIPIENT_EMAIL`:release 打给谁。demo 和 `.env.example` 用沙箱 personal 号(钥匙文件里 `PAYPAL_SANDBOX_PERSONAL_EMAIL`)。settings 页可改。
+6. LLM 的 decide 上下文:把"本月已付/预算"换成"pot 余额 + 近 30 天 release/deposit 行"。system prompt 加一句:`The pot balance is a hard limit enforced by code before you are asked; you never need to check it.`
+
+**不变:** extract → 硬顶 → decide 的顺序;decide 只走 tool use;规矩文本原样喂;单用户;无 webhook;无登录;技术栈;MIT;部署位置。
+
+**仍然不做:** 退款、订阅、争议、多收款人、PayPal 余额 API 对账(README limits 里写一句:pot 余额按账本算,与 PayPal 账户真实余额可能因手续费/沙箱行为有差)。
+
+### v2.2 数据模型差异
+
+```
+ledger 加两列:
+  kind TEXT NOT NULL DEFAULT 'request'   -- request | deposit | release
+  paypal_payout_batch_id TEXT NULL, paypal_payout_item_id TEXT NULL, paypal_transaction_id TEXT NULL
+
+status 取值补齐:
+  request : declined | ask | approved        -- approved 的 request 行会紧跟一条 release 行(同一 request_id 关联,加列 request_id INTEGER NULL)
+  deposit : pending | paid | cancelled | capture_failed
+  release : pending | released | failed | unclaimed
+settings 去掉 monthly_cap_usd,加 recipient_email TEXT
+```
+
+迁移:现有 `data/hubby.db` 直接删了重建(demo 库,没有需要保留的数据);线上 `HUBBY_DEMO_RESET=1` 那套照旧。
+
+### v2.3 Payouts 调用(写进 `app/paypal.py`,Day 1 先用 `scripts/paypal_smoke.py` 跑通)
+
+- `POST /v1/payments/payouts`,Bearer token 同 v1。body:
+  ```json
+  {"sender_batch_header": {"sender_batch_id": "hubby-<ledger_id>-<unix>", "email_subject": "Hubby released $6.00", "email_message": "Approved: fried chicken drumstick"},
+   "items": [{"recipient_type": "EMAIL", "receiver": "<recipient_email>", "amount": {"value": "6.00", "currency": "USD"}, "note": "<item>", "sender_item_id": "<ledger_id>"}]}
+  ```
+  成功 201,取 `batch_header.payout_batch_id`。`sender_batch_id` 必须唯一,重试同一笔要复用同一个 id(PayPal 用它去重,避免双发)。
+- 轮询 `GET /v1/payments/payouts/{payout_batch_id}`,最多 10 次、间隔 1s:`items[0].transaction_status` 为 `SUCCESS` → `released`,记 `payout_item_id` 和 `transaction_id`;`PENDING`/`PROCESSING` 超时未变 → 留 `pending`,账本页显示,**不自动再轮询**(与 v1 不做 webhook 一致);`FAILED`/`BLOCKED`/`DENIED`/`RETURNED` → `failed`,理由存 PayPal 的 `errors.message`;`UNCLAIMED` → `unclaimed`(收款邮箱没 PayPal 号,沙箱 personal 号不会出现)。
+- 可能的坑,Day 1 就会撞到:
+  - 403 / `AUTHORIZATION_ERROR` / `PAYOUT_NOT_ENABLED`:沙箱 app 没开 Payouts 功能。到 developer.paypal.com → Apps & Credentials → 这个 app → Features 里勾 Payouts。**这个要 Royola 的开发者后台**,撞到就在群里说一句,别自己绕。
+  - `INSUFFICIENT_FUNDS`:沙箱 business 号余额不够。先用 Fund the pot 充一笔,或在 Sandbox Accounts 里给 business 号加余额(也是 Royola 后台)。
+- 幂等:同一 `ledger_id` 的 release 只允许发一次;服务重启不重发。
+
+### v2.4 页面差异
+
+- 首页:聊天框不变;右栏顶部 **Pot: $X.XX** + 一个 **Fund the pot** 小表单(金额 → PayPal 按钮,新窗口);最近 5 条账本行混合三种 kind,颜色区分。
+- 账本页:加 kind 列;顶部换成 Pot balance、本月 deposits 合计、本月 releases 合计、按类别小计(只算 release)。
+- settings 页:rules 文本域 + recipient email;去掉 cap。
+- return/cancel 的 flash 文案改成 `Pot funded +$20.00 · capture …` / `Released $6.00 to you · payout …`(release 不经过 return,flash 直接在 `/api/request` 响应里给,前端渲染成一条绿色行)。
+
+### v2.5 种子与 demo 剧本
+
+- 首次启动:pot = 0,无 deposit;规矩文本同 v1 §7;预埋两行 **release**:昨天 bubble tea $4.50 drink released、今天 Pepsi $1.20 sweets released(日期相对今天算)。**注意**:预埋 release 会让 pot 账面为负,所以预埋时同时预埋一条 deposit `$5.70 · seed · paid`,让账面归零,理由字段写 `seed`。
+- demo 剧本(README "What to try" 和视频都按这个):
+  1. 打 "fried chicken drumstick $6" → `Pot has $0.00, you asked for $6.00. Fund it first.`(硬顶,代码,没问 AI)
+  2. Fund the pot $20 → PayPal 按钮 → 买家付 → 回来 `Pot funded +$20.00`
+  3. 再打 "fried chicken drumstick $6" → approve → `Released $6.00 to you · payout …` → pot $14.00
+  4. 打 "bubble tea $4.50" → decline,引 3 天规矩和昨天那杯
+  5. 打 "a cake" → ask
+  6. 打 "dessert $5" → decline,引 one sweet thing per day
+  7. 打 "lunch $15" → `Pot has $14.00, you asked for $15.00.` 硬顶
+  8. 切账本页;切沙箱 personal 号的 Activity 页,$6.00 from Hubby 在那儿
+
+### v2.6 验收(替换 v1 §9 的 2–7;1、8、9 不变)
+
+2. 空 pot 发 "fried chicken drumstick $6" → `decline`,理由是 `Pot has $0.00, you asked for $6.00. Fund it first.` 原文,账本里 **没有** LLM 的话,也没有建任何 PayPal 单。
+3. Fund the pot 20 → PayPal 按钮 → 买家沙箱号付款 → 回到 `/`,flash 含 `Pot funded +$20.00` 和 capture id;账本 deposit 行 `paid`;Pot 显示 $20.00(减去 seed 影响后)。
+4. 再发 "fried chicken drumstick $6" → `approve` → 响应里 `status=released`、`payout_item_id` 非空;账本一条 request `approved` + 一条 release `released`;Pot 变 $14.00;**沙箱 personal 号登进去 Activity 里有一笔 $6.00 收入**,备注是 item 名。
+5. 发 "bubble tea $4.50" → `decline`,理由引 3 天规矩和上一杯日期(同 v1)。
+6. 发 "a cake" → `ask`,不建单不打款。
+7. 发 "lunch $15"(pot 14)→ `decline`,`Pot has $14.00, you asked for $15.00. Fund it first.`,不经 LLM。
+7b. Fund the pot 走到 PayPal 页点取消 → deposit 行 `cancelled`,Pot 不变。
+7c. 把 `HUBBY_RECIPIENT_EMAIL` 改成一个不存在的邮箱(如 `nobody-<随机>@example.com`)再 approve 一笔 → release 行 `unclaimed` 或 `pending`,不是 `released`,Pot 仍按已扣算;改回去。
+10. 同一条 approve 不会双发:人为让轮询超时(把轮询次数改 0 跑一次),账本 `pending`;重启服务,**没有**第二笔 payout 出现在 personal 号里。
+
+### v2.7 日程(替换 v1 §8)
+
+- **11/08**:`scripts/paypal_smoke.py` 加第三段:给 personal 号 payout $1.00,打印 batch id → 轮询到 SUCCESS → 打印 transaction_id。撞到 Payouts 没开/余额不够,立刻群里说(要 Royola 后台)。通了再动代码。
+- **11/09**:v2.1–v2.4 全部;离线测试跟着改(假 Payouts:成功 / 超时 / 失败 / unclaimed 四种);本地按 v2.6 跑一遍。
+- **11/10**:README 按 v2 重写 How it works / What to try / Configuration;部署;线上按 v2.6 跑一遍截图进 `evidence/acceptance-v2/`。
+- **11/11**:修;**当晚冻结**。
+- 11/12:Eltanin 视频 + Devpost。
+
+### v2.8 视频骨架(替换 v1 §12)
+
+0:00 首页,pot $0。打 "fried chicken drumstick $6" → "Pot has $0.00… Fund it first." 字幕:*code said no, the model wasn't even asked*
+0:20 Fund the pot $20 → PayPal → 付 → 回来 Pot $20
+0:50 再打一遍 → approve → "Released $6.00 to you" → 切到买家 PayPal Activity,$6 到账
+1:20 "bubble tea $4.50" → 拒,理由念出来(引规矩、引昨天那杯)
+1:45 "lunch $15" → 硬顶,pot 14
+2:05 账本页:deposit、release、declined 三种行
+2:25 收尾一句:*Hubby holds the money. The LLM argues, the code enforces, PayPal moves it — and only when Hubby says yes.*
+2:45 完
+
+---
+
+## v1 原文(保留作参考;与 v2 冲突处以 v2 为准)
+
 ## 0. 一句话
 
 用户用一段人话给 Hubby 立规矩和月预算;之后每次想买东西先问它。它判(LLM),它付(PayPal 沙箱真下单、真收款),它记账,超了它拒付。**LLM 负责讲理,代码负责硬顶**:月预算上限由代码强制,LLM 说"批"也过不去。
