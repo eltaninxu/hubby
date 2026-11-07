@@ -136,7 +136,7 @@ Anything over $20 in one go needs a one-line reason in the request.
 2. 发 "bubble tea $4.50" → 返回 `decline`,理由里出现上一杯的日期和"3 days"。账本多一行 declined。
 3. 发 "fried chicken drumstick $6" → `approve`,出现 PayPal 按钮;点开,用买家沙箱号登录付款;回到 `/`,flash 显示 Paid 和 capture id;账本该行 `paid`,`paypal_capture_id` 非空;PayPal 沙箱卖家后台能看到这笔。
 4. 发 "a cake" → `ask`,理由是问价格,不建单。
-5. 把月预算改成 `7`,再发 "lunch $8" → `decline`,理由是 `Hard cap: $6.00 of $7 used this month` 这个格式,**账本理由里没有 LLM 的话**。
+5. 把月预算改成 `7`,再发 "lunch $8" → `decline`,理由是 `Hard cap: $11.70 of $7 used this month` 这个格式(种子两行 $5.70 + 验收 3 那笔炸鸡 $6.00),**账本理由里没有 LLM 的话**。
 6. 发 "dessert $5" 在同一天已有 paid 的 sweets 之后 → `decline`,理由引用 "One sweet thing per day"。
 7. 买家在 PayPal 页点取消 → 回到 `/paypal/cancel` → 账本该行 `cancelled`,本月已付不变。
 8. README 从头读一遍,一个评委没见过我们家也能照着跑到第 3 条。

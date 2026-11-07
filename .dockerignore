@@ -1,0 +1,11 @@
+.git
+.venv
+.dev
+data
+evidence
+tests
+__pycache__
+*.pyc
+.env
+.pytest_cache
+PLAN.md
