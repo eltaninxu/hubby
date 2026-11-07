@@ -268,7 +268,7 @@ hubby.royola.dev {
    ```
    PAYPAL_RETURN_BASE=https://hubby.royola.dev
    HUBBY_PORT=127.0.0.1:8085
-   LLM_GATEWAY_NETWORK=lucifer_gateway_default
+   LLM_GATEWAY_NETWORK=hubby_edge
    HUBBY_DEMO_RESET=1
    ```
    `HUBBY_PORT` 带主机前缀,让容器端口只发布到回环,不暴露到外网;`HUBBY_DEMO_RESET=1` 让公开 demo 在闲置 12 小时后回到种子状态。
@@ -278,7 +278,7 @@ hubby.royola.dev {
    ```
 3. 验:`curl https://hubby.royola.dev/healthz` 回 200;再用公网地址真付一笔,确认 PayPal 跳得回来。
 
-⚠ `lucifer_gateway_default` 只用来让 Caddy 连到 hubby,不要动那个网络上的其他容器。
+⚠ 用 worker 单开的 `hubby_edge`(上面只有 Caddy 和 litellm),不要挂 `lucifer_gateway_default`——那上面有数据库和 backend。compose 里给 `hubby` 设了 `mem_limit: 256m`,这台箱子不只我们一家。
 
 ## 14. 测试与自动验收
 

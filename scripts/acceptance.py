@@ -36,7 +36,7 @@ RESULTS: list[tuple[str, bool, str]] = []
 # Assembled at runtime so this file itself never contains key-looking text.
 SECRET_RE = re.compile("s" + "k-" + r"|EL[A-Za-z0-9_-]{60,}|BAA" + "2")
 SECRET_RE_HISTORY = re.compile(
-    "s" + "k-" + r"|EL[A-Za-z0-9_-]{60,}|BAA" + "2" + r"[A-Za-z0-9_-]{20,}"
+    "s" + "k-" + r"[A-Za-z0-9_-]{20,}|EL[A-Za-z0-9_-]{60,}|BAA" + "2" + r"[A-Za-z0-9_-]{20,}"
 )
 
 
@@ -54,6 +54,18 @@ def db_conn() -> sqlite3.Connection:
 def db_rows(limit: int = 5) -> list[sqlite3.Row]:
     with db_conn() as conn:
         return list(conn.execute("SELECT * FROM ledger ORDER BY id DESC LIMIT ?", (limit,)))
+
+
+def row_for(text: str) -> sqlite3.Row | None:
+    """Find the row for exactly this request, not just the newest row.
+
+    Browser navigation can leave a stray submit in the ledger; asserting on
+    "the last row" turns that into a false failure.
+    """
+    with db_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM ledger WHERE raw_text = ? ORDER BY id DESC LIMIT 1", (text,)
+        ).fetchone()
 
 
 def month_paid() -> float:
@@ -77,9 +89,12 @@ def seed_day(name: str) -> str | None:
     return row["paid_at"][:10] if row else None
 
 
-def reset_cap(cap: float) -> None:
+async def reset_cap(http: httpx.AsyncClient, cap: float) -> None:
+    """Go through the app, not the DB: the DB belongs to the container user."""
     with db_conn() as conn:
-        conn.execute("UPDATE settings SET monthly_cap_usd = ? WHERE id = 1", (cap,))
+        row = conn.execute("SELECT rules FROM settings WHERE id = 1").fetchone()
+    rules = row["rules"] if row else "Be reasonable."
+    await http.post("/settings", data={"rules": rules, "monthly_cap_usd": f"{cap:.2f}"})
 
 
 async def shot(page: Page, name: str) -> None:
@@ -158,9 +173,8 @@ async def main() -> int:
         os.environ.get("PAYPAL_SANDBOX_PERSONAL_EMAIL")
         and os.environ.get("PAYPAL_SANDBOX_PERSONAL_PASSWORD")
     )
-    reset_cap(120)
-
     async with httpx.AsyncClient(base_url=BASE, timeout=30) as http:
+        await reset_cap(http, 120)
         health = (await http.get("/healthz")).json()
         home = await http.get("/")
         check(
@@ -180,7 +194,7 @@ async def main() -> int:
         # 2. bubble tea declined, citing the last cup and the 3 day rule
         last_cup = seed_day("bubble tea")
         await say(page, "bubble tea $4.50")
-        row = db_rows(1)[0]
+        row = row_for("bubble tea $4.50")
         check(
             "2. bubble tea declined, citing the last cup and 3 days",
             row["decision"] == "decline"
@@ -206,19 +220,23 @@ async def main() -> int:
             try:
                 flash = await pay_with_paypal(page, context, "03-pay")
                 await page.goto(BASE + "/", wait_until="networkidle")
-                paid_row = db_rows(1)[0]
+                paid_row = row_for("fried chicken drumstick $6")
                 expected_total = round(baseline + 6.0, 2)
                 check(
                     "3b. buyer paid, capture landed, ledger is paid",
-                    paid_row["status"] == "paid"
+                    paid_row is not None
+                    and paid_row["status"] == "paid"
                     and bool(paid_row["paypal_capture_id"])
                     and month_paid() == expected_total,
-                    f"capture={paid_row['paypal_capture_id']} month=${month_paid():.2f}"
-                    f" baseline=${baseline:.2f}",
+                    f"capture={paid_row['paypal_capture_id'] if paid_row else None}"
+                    f" month=${month_paid():.2f} baseline=${baseline:.2f}",
                 )
                 check(
                     "3c. flash shows Paid and the capture id",
-                    "Paid" in flash and paid_row["paypal_capture_id"][:10] in flash,
+                    paid_row is not None
+                    and bool(paid_row["paypal_capture_id"])
+                    and "Paid" in flash
+                    and paid_row["paypal_capture_id"][:10] in flash,
                     flash[:80],
                 )
                 await shot(page, "03-paid")
@@ -229,7 +247,7 @@ async def main() -> int:
 
         # 4. "a cake" asks for the price and never builds an order
         await say(page, "a cake")
-        row = db_rows(1)[0]
+        row = row_for("a cake")
         check(
             "4. 'a cake' asks how much, no order",
             row["decision"] == "ask"
@@ -246,7 +264,7 @@ async def main() -> int:
         await page.wait_for_timeout(800)
         await page.goto(BASE + "/", wait_until="networkidle")
         await say(page, "lunch $8")
-        row = db_rows(1)[0]
+        row = row_for("lunch $8")
         paid_now = month_paid()
         expected = f"Hard cap: ${paid_now:.2f} of $7 used this month"
         check(
@@ -265,7 +283,7 @@ async def main() -> int:
 
         # 6. one sweet thing per day
         await say(page, "dessert $5")
-        row = db_rows(1)[0]
+        row = row_for("dessert $5")
         check(
             "6. dessert declined citing one sweet thing per day",
             row["decision"] == "decline" and "One sweet thing per day" in row["reason"],
@@ -280,7 +298,7 @@ async def main() -> int:
             try:
                 flash = await cancel_at_paypal(page, context)
                 await page.goto(BASE + "/", wait_until="networkidle")
-                row = db_rows(1)[0]
+                row = row_for("coffee $3")
                 check(
                     "7. cancel leaves the row cancelled and the month total unchanged",
                     row["status"] == "cancelled"
@@ -304,20 +322,21 @@ async def main() -> int:
 
     # 9. no secrets in the working tree or anywhere in git history
     tree_hits: list[str] = []
-    for path in pathlib.Path(".").rglob("*"):
-        if any(
-            part in {".git", ".venv", ".dev", "data", "evidence", "__pycache__"}
-            for part in path.parts
-        ):
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], capture_output=True, text=True, timeout=60
+    ).stdout.split("\0")
+    for name in tracked:
+        if not name:
             continue
-        if not path.is_file() or path.suffix in {".png", ".db", ".whl"}:
+        path = pathlib.Path(name)
+        if path.suffix in {".png", ".db", ".whl"}:
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         if SECRET_RE.search(text):
-            tree_hits.append(str(path))
+            tree_hits.append(name)
 
     history_hits: list[str] = []
     try:

@@ -15,4 +15,4 @@ services:
 networks:
   llm:
     external: true
-    name: ${LLM_GATEWAY_NETWORK:-litellm_default}
+    name: ${LLM_GATEWAY_NETWORK:-hubby_edge}

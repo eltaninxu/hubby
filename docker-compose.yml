@@ -8,6 +8,8 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    # This box is shared with someone else's production containers.
+    mem_limit: 256m
     healthcheck:
       test:
         - CMD
