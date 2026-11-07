@@ -1,0 +1,129 @@
+"""Environment loading and validation.
+
+The app fails fast with a message that names the missing variable, because the
+first thing a judge hits is usually a half-filled .env.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# .env next to this repo; real values never live in the repo itself.
+load_dotenv(ROOT / ".env")
+
+PAYPAL_SANDBOX_API = "https://api-m.sandbox.paypal.com"
+
+
+class ConfigError(RuntimeError):
+    """Raised when the environment is incomplete or unsupported."""
+
+
+def _env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return default
+
+
+@dataclass(frozen=True)
+class Settings:
+    paypal_env: str
+    paypal_client_id: str
+    paypal_client_secret: str
+    paypal_return_base: str
+    openai_api_key: str
+    openai_base_url: str | None
+    llm_model: str
+    monthly_cap_usd: float
+    db_path: Path
+    llm_stub: bool
+
+    @property
+    def paypal_api(self) -> str:
+        if self.paypal_env != "sandbox":
+            raise ConfigError(
+                f"PAYPAL_ENV={self.paypal_env!r} is not supported; this build is sandbox-only."
+            )
+        return PAYPAL_SANDBOX_API
+
+    @property
+    def return_url(self) -> str:
+        return f"{self.paypal_return_base}/paypal/return"
+
+    @property
+    def cancel_url(self) -> str:
+        return f"{self.paypal_return_base}/paypal/cancel"
+
+
+def load_settings(*, require_llm: bool = True) -> Settings:
+    paypal_env = _env("PAYPAL_ENV", default="sandbox").lower()
+    if paypal_env != "sandbox":
+        raise ConfigError(
+            f"PAYPAL_ENV={paypal_env!r} is not supported; set PAYPAL_ENV=sandbox."
+        )
+
+    client_id = _env("PAYPAL_CLIENT_ID", "PAYPAL_SANDBOX_CLIENT_ID")
+    client_secret = _env("PAYPAL_CLIENT_SECRET", "PAYPAL_SANDBOX_SECRET")
+    missing = [
+        name
+        for name, value in (
+            ("PAYPAL_CLIENT_ID", client_id),
+            ("PAYPAL_CLIENT_SECRET", client_secret),
+        )
+        if not value
+    ]
+    if missing:
+        raise ConfigError(
+            "Missing required env var(s): "
+            + ", ".join(missing)
+            + ". Copy .env.example to .env and fill them in."
+        )
+
+    api_key = _env("OPENAI_API_KEY")
+    if require_llm and not api_key:
+        raise ConfigError(
+            "Missing required env var: OPENAI_API_KEY. "
+            "Copy .env.example to .env and fill it in."
+        )
+
+    cap_raw = _env("MONTHLY_CAP_USD", default="120")
+    try:
+        monthly_cap = float(cap_raw)
+    except ValueError as exc:
+        raise ConfigError(f"MONTHLY_CAP_USD={cap_raw!r} is not a number.") from exc
+    if monthly_cap <= 0:
+        raise ConfigError(f"MONTHLY_CAP_USD must be positive, got {cap_raw!r}.")
+
+    db_path = Path(_env("HUBBY_DB", default=str(ROOT / "data" / "hubby.db")))
+
+    return Settings(
+        paypal_env=paypal_env,
+        paypal_client_id=client_id,
+        paypal_client_secret=client_secret,
+        paypal_return_base=_env(
+            "PAYPAL_RETURN_BASE", default="http://localhost:8080"
+        ).rstrip("/"),
+        openai_api_key=api_key,
+        openai_base_url=_env("OPENAI_BASE_URL") or None,
+        llm_model=_env("LLM_MODEL", default="gpt-5.4-mini"),
+        monthly_cap_usd=monthly_cap,
+        db_path=db_path,
+        llm_stub=_env("LLM_STUB", default="").lower() in {"1", "true", "yes"},
+    )
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return load_settings()
+
+
+def reset_settings_cache() -> None:
+    get_settings.cache_clear()

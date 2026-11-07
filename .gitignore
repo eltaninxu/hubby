@@ -1,0 +1,20 @@
+# --- secrets & local state ---
+.env
+data/
+evidence/
+.venv/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- editors / os ---
+.DS_Store
+.idea/
+.vscode/
+
+# dev-only automation, not shipped
+.dev/
