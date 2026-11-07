@@ -236,3 +236,39 @@ def test_demo_reset_restores_the_seeded_household(client, db):
     assert db.get_settings()["monthly_cap_usd"] == 120
     assert len(db.all_entries()) == 2
     assert db.month_paid_usd() == 5.70
+
+
+def test_price_followup_completes_the_question(client, brain, db):
+    """'How much is it?' then '$3' must resolve the original request, not re-ask."""
+    brain.extract_results = {
+        "bubble tea": {"amount_usd": None, "item": "bubble tea", "category": "drink"},
+        "bubble tea $3": {"amount_usd": 3.0, "item": "bubble tea", "category": "drink"},
+    }
+    brain.decide_result = {
+        "decision": "decline",
+        "reason": "Bubble tea is once every 3 days.",
+        "category": "drink",
+    }
+
+    first = ask(client, "bubble tea")
+    second = ask(client, "$3")
+
+    assert first["decision"] == "ask"
+    assert second["decision"] == "decline"
+    latest = db.all_entries()[0]
+    assert latest["raw_text"] == "bubble tea $3"
+    assert latest["amount_usd"] == 3.0
+
+
+def test_unrelated_request_does_not_absorb_the_question(client, brain, db):
+    brain.extract_results = {
+        "bubble tea": {"amount_usd": None, "item": "bubble tea", "category": "drink"},
+        "coffee $3": {"amount_usd": 3.0, "item": "coffee", "category": "drink"},
+    }
+    brain.decide_result = {"decision": "approve", "reason": "ok", "category": "drink"}
+
+    ask(client, "bubble tea")
+    ask(client, "coffee $3")
+
+    assert db.all_entries()[0]["raw_text"] == "coffee $3"
+    assert db.all_entries()[0]["amount_usd"] == 3.0

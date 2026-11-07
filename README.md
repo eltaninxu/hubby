@@ -85,6 +85,7 @@ tea, today's Pepsi) so the first thing you type gets a real answer.
 | `bubble tea $4.50` | **decline** — the rule says once every 3 days, and the ledger shows yesterday's cup |
 | `fried chicken drumstick $6` | **approve** → a PayPal button → pay with the sandbox buyer account → back on `/` with "Paid $6.00 · capture …" |
 | `a cake` | **ask** — "How much is it?", no order created |
+| `bubble tea`, then `3` | the follow-up is read as the price of the same request, not a new one |
 | Settings: set cap to `7`, then `lunch $8` | **decline** with `Hard cap: $11.70 of $7 used this month` — and the reason contains no model text |
 | `dessert $5` | **decline** — "One sweet thing per day", citing today's Pepsi |
 | Pay, then click *Cancel* on PayPal | ledger row becomes `cancelled`, month total unchanged |

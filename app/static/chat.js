@@ -43,7 +43,9 @@ function addVerdict(result) {
 
   const head = el("div", "head");
   head.appendChild(el("span", "pill " + result.decision, result.decision));
-  const detail = [money(result.amount), result.category].filter(Boolean).join(" · ");
+  const detail = [result.item, money(result.amount), result.category]
+    .filter(Boolean)
+    .join(" · ");
   if (detail) head.appendChild(el("span", "amount", detail));
   bubble.appendChild(head);
 

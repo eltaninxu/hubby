@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -24,6 +27,14 @@ from app.ratelimit import RateLimiter
 
 log = logging.getLogger("hubby")
 
+# "3", "$3", "about 3.50", "3 dollars" -- an answer to "how much is it?"
+FOLLOWUP_PRICE = re.compile(
+    r"^\s*(?:it'?s|it is|about|around|maybe|only|just)?\s*\$?\s*"
+    r"\d+(?:[.,]\d{1,2})?\s*(?:usd|dollars?|bucks?)?\s*$",
+    re.IGNORECASE,
+)
+PENDING_TTL_SECONDS = 15 * 60
+
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.globals["money"] = money
@@ -32,6 +43,27 @@ templates.env.globals["cap_label"] = cap_label
 
 def _seed_enabled() -> bool:
     return os.environ.get("HUBBY_SEED", "1").strip().lower() not in {"0", "false", "no"}
+
+
+def _session_id(request: Request) -> str:
+    return request.cookies.get("hubby_sid") or "anon"
+
+
+def _remember_question(state: Any, session: str, text: str) -> None:
+    state.pending[session] = {"text": text, "at": time.monotonic()}
+    cutoff = time.monotonic() - PENDING_TTL_SECONDS
+    for key in [k for k, v in state.pending.items() if v["at"] < cutoff]:
+        state.pending.pop(key, None)
+
+
+def _take_question(state: Any, session: str) -> dict[str, Any] | None:
+    pending = state.pending.get(session)
+    if not pending:
+        return None
+    if time.monotonic() - pending["at"] > PENDING_TTL_SECONDS:
+        state.pending.pop(session, None)
+        return None
+    return pending
 
 
 def _client_ip(request: Request) -> str:
@@ -80,6 +112,7 @@ async def lifespan(app: FastAPI):
     app.state.db = db
     app.state.brain = HubbyBrain(settings)
     app.state.paypal = client_from_settings(settings)
+    app.state.pending = {}
     app.state.limiter = RateLimiter(
         {
             "api": settings.rate_api,
@@ -133,11 +166,20 @@ def _budget_view(db: Database) -> dict[str, Any]:
 @app.get("/", response_class=HTMLResponse)
 async def chat_page(request: Request, flash: str | None = None):
     db: Database = request.app.state.db
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         request,
         "chat.html",
         {"flash": flash, "budget": _budget_view(db), "recent": db.recent(5)},
     )
+    if not request.cookies.get("hubby_sid"):
+        response.set_cookie(
+            "hubby_sid",
+            uuid.uuid4().hex,
+            httponly=True,
+            samesite="lax",
+            max_age=86_400,
+        )
+    return response
 
 
 @app.get("/ledger", response_class=HTMLResponse)
@@ -208,6 +250,13 @@ async def api_request(request: Request):
         return JSONResponse({"error": "Say what you want to buy."}, status_code=400)
 
     state = request.app.state
+    session = _session_id(request)
+    asked = _take_question(state, session)
+    if asked and FOLLOWUP_PRICE.match(text):
+        # "How much is it?" -> "3" means "bubble tea 3", not a new mystery item.
+        text = f"{asked['text']} {text}".strip()
+        state.pending.pop(session, None)
+
     try:
         result = await _handle_purchase(state, text)
     except LLMError as exc:
@@ -216,6 +265,11 @@ async def api_request(request: Request):
         )
     except PayPalError as exc:
         return JSONResponse({"error": f"PayPal refused: {exc}"}, status_code=502)
+
+    if result["decision"] == "ask":
+        _remember_question(state, session, text)
+    else:
+        state.pending.pop(session, None)
     return JSONResponse(result)
 
 
@@ -226,6 +280,7 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
     # 1. facts out of the sentence
     parsed = await brain.extract(text)
     amount = parsed.get("amount_usd")
+    item = parsed.get("item") or text
     category = parsed.get("category") or "other"
 
     # 2. no price -> ask, never build an order
@@ -243,6 +298,7 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "decision": "ask",
             "reason": reason,
             "amount": None,
+            "item": item,
             "category": category,
             "status": "declined",
             "ledger_id": entry_id,
@@ -271,6 +327,7 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "decision": "decline",
             "reason": reason,
             "amount": float(amount),
+            "item": item,
             "category": category,
             "status": "declined",
             "ledger_id": entry_id,
@@ -301,6 +358,7 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "decision": verdict["decision"],
             "reason": verdict["reason"],
             "amount": float(amount),
+            "item": item,
             "category": verdict["category"],
             "status": "declined",
             "ledger_id": entry_id,
@@ -321,6 +379,7 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
         "decision": "approve",
         "reason": verdict["reason"],
         "amount": float(amount),
+        "item": item,
         "category": verdict["category"],
         "status": "pending",
         "approve_url": approve_url,

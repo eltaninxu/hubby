@@ -11,6 +11,7 @@ class FakeBrain:
 
     def __init__(self) -> None:
         self.extract_result = {"amount_usd": 6.0, "item": "thing", "category": "food"}
+        self.extract_results: dict[str, dict] = {}
         self.decide_result = {
             "decision": "approve",
             "reason": 'Meals are fine.',
@@ -21,7 +22,7 @@ class FakeBrain:
 
     async def extract(self, text: str) -> dict:
         self.extract_calls += 1
-        return dict(self.extract_result)
+        return dict(self.extract_results.get(text, self.extract_result))
 
     async def decide(self, **kwargs) -> dict:
         self.decide_calls += 1
