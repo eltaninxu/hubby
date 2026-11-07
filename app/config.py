@@ -137,7 +137,7 @@ def load_settings(*, require_llm: bool = True) -> Settings:
         openai_base_url=_env("OPENAI_BASE_URL") or None,
         llm_model=llm_model,
         recipient_email=recipient_email,
-        payout_poll_attempts=max(1, int(number("PAYOUT_POLL_ATTEMPTS", "8"))),
+        payout_poll_attempts=max(1, int(number("PAYOUT_POLL_ATTEMPTS", "20"))),
         payout_poll_interval=max(0.0, number("PAYOUT_POLL_INTERVAL", "1.5")),
         db_path=db_path,
         llm_stub=_env("LLM_STUB", default="").lower() in {"1", "true", "yes"},

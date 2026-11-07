@@ -8,7 +8,7 @@
 >
 > v2 落地状态(2026-11-07):线上 `https://hubby.royola.dev` 跑 v2;验收脚本
 > `scripts/acceptance.py` 按 SPEC v2.6 重写,2026-11-07 一轮 `evidence/acceptance-v2/` 全过;
-> 离线测试 29 个;Payouts 已开通,沙箱到账约 20–60 秒,轮询窗口默认 8×1.5s(线上 .env 覆盖为 20×1.5s:实测沙箱约 17.5s 才 SUCCESS);unclaimed 计入 pot 扣减。
+> 离线测试 29 个;Payouts 已开通,沙箱到账约 20–60 秒,轮询窗口默认 20×1.5s(SPEC v2.9 原写 8×1.5s,实测沙箱约 17.5s 才 SUCCESS,2026-11-07 家长同意改默认);unclaimed 计入 pot 扣减。
 
 > 依据 `SPEC.md`。本文只定"怎么做",不改需求。第 12 节列了必须你/家长拍板的事,其余按此执行。
 > 写于 2026-11-07 PT(比 SPEC 的 Day 1 早一天)。

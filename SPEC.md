@@ -119,7 +119,7 @@ settings 去掉 monthly_cap_usd,加 recipient_email TEXT
 v2 线上验过:`lunch $15` 在 pot 14 时回 `Pot has $14.00, you asked for $15.00. Fund it first.`;买家 Activity 里 +$6.00 ×2、−$20.00 ×2 都在;29 个测试绿。以下是改的:
 
 1. **unclaimed 要从 pot 里扣。** 现在 README 191–192 行和 `budget.py` 的公式把 `unclaimed` 排除在外,这跟 SPEC v2.6-7c("Pot 仍按已扣算")和 PayPal 实际行为都反了:payout 发出去的那一刻钱就离开了发款账户,收款邮箱没 PayPal 号时 PayPal 替它挂着,30 天没人领才退回。所以 `unclaimed` 在我们账上等同于 `pending`/`released`,**都算已出**。改三处:`budget.py` 公式把 `unclaimed` 加进扣减集合;README "The pot" 和 "Design notes" 那两句改成"`failed` 不扣,其余(`pending` / `released` / `unclaimed`)都扣;退回不自动对账";`tests/test_budget.py` 加一条 unclaimed 扣减的断言。
-2. **轮询别让人盯 45 秒。** 默认改成 `PAYOUT_POLL_ATTEMPTS=8`、`PAYOUT_POLL_INTERVAL=1.5`(最多 12 秒;沙箱通常 2–5 秒就 SUCCESS),README 表里的默认值同步。同时确认 `chat.js` 在等 `/api/request` 返回的这段时间里有一条可见的 "Releasing via PayPal…" 行(发请求时插入,响应到了替换成结果);没有就加,不要让按钮点下去页面没反应。
+2. **轮询别让人盯 45 秒。** 默认 `PAYOUT_POLL_INTERVAL=1.5`,次数先按 8 次写;**11/07 跑腿实测沙箱要约 17.5 秒才 SUCCESS,家长同意把次数改成 20(最多 30 秒)**,README 表里的默认值同步。同时确认 `chat.js` 在等 `/api/request` 返回的这段时间里有一条可见的 "Releasing via PayPal…" 行(发请求时插入,响应到了替换成结果);没有就加,不要让按钮点下去页面没反应。
 3. **README "What to try" 第 3 步**加半句:*(the payout arrives from the business account's display name — rename it in the sandbox dashboard if you want it to read "Hubby")*。这是给评委的,也是给我们自己的。
 
 **Royola 做(不是跑腿的活):** 沙箱后台 Sandbox Accounts → business 号 → 把 business name 改成 `Hubby`,视频里买家 Activity 那一行就会显示 "+$6.00 from Hubby",比任何字幕都管用。
