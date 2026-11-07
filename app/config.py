@@ -47,6 +47,7 @@ class Settings:
     recipient_email: str
     payout_poll_attempts: int
     payout_poll_interval: float
+    settings_open: bool
     db_path: Path
     llm_stub: bool
     demo_reset: bool
@@ -140,6 +141,7 @@ def load_settings(*, require_llm: bool = True) -> Settings:
         recipient_email=recipient_email,
         payout_poll_attempts=max(1, int(number("PAYOUT_POLL_ATTEMPTS", "20"))),
         payout_poll_interval=max(0.0, number("PAYOUT_POLL_INTERVAL", "1.5")),
+        settings_open=_env("HUBBY_SETTINGS_OPEN", default="0").lower() in {"1", "true", "yes"},
         db_path=db_path,
         llm_stub=_env("LLM_STUB", default="").lower() in {"1", "true", "yes"},
         demo_reset=_env("HUBBY_DEMO_RESET", default="0").lower() in {"1", "true", "yes"},

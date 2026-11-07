@@ -8,7 +8,8 @@
 >
 > **线上开关(重要):** 公网 demo 按需开关,平时关着以免陌生人消耗模型额度。
 > `scripts/demo.sh on|off|status`;关掉后 Caddy 返回 502,域名还在。
-> 每日请求上限默认 200(`HUBBY_DAILY_REQUESTS`),按 IP 限流按 Caddy 追加的**最后一跳**取 IP。
+> 每日请求上限默认 200(`HUBBY_DAILY_REQUESTS`),按 IP 限流按 Caddy 追加的**最后一跳**取 IP;
+> 公网 `/settings` 只读(只有本机/内网能改,`HUBBY_SETTINGS_OPEN=1` 可放开)。
 > 视频录制、评委窗口(11/11 冻结后到 11/12 截止)保持 on。
 >
 > v2 落地状态(2026-11-07):线上 `https://hubby.royola.dev` 跑 v2;验收脚本

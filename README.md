@@ -157,6 +157,7 @@ All settings live in `.env` (see `.env.example`).
 | `HUBBY_SEED` | no | `0` to start with an empty ledger |
 | `HUBBY_DEMO_RESET` | no | `1` to reset an idle demo back to the seeded state |
 | `HUBBY_DAILY_REQUESTS` | no | Hard daily ceiling on the public demo (default `200`, `0` = unlimited) |
+| `HUBBY_SETTINGS_OPEN` | no | `1` lets anyone edit rules/recipient; by default only the host and its private network can |
 | `PAYOUT_POLL_ATTEMPTS` / `PAYOUT_POLL_INTERVAL` | no | How long to wait for a payout to settle (default 20 × 1.5s, because sandbox payouts can take ~15–20s) |
 
 The app refuses to start if a required value is missing, and tells you which one.
@@ -234,6 +235,9 @@ tests/            pytest, offline
 - The rules are plain text fed to the model as-is. There is no monthly cap
   number: the cap is the pot.
 - The chat transcript is not persisted (the ledger is).
+- On the hosted demo, `/settings` is read-only for public visitors: changing the
+  rules or the payout address requires a request from the host or its private
+  network (`HUBBY_SETTINGS_OPEN=1` lifts that for local use).
 
 ## License
 

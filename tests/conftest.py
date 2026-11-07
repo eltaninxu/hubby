@@ -93,6 +93,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("LLM_MODEL", "test-model")
     monkeypatch.setenv("HUBBY_RECIPIENT_EMAIL", "me@example.com")
+    monkeypatch.setenv("HUBBY_SETTINGS_OPEN", "1")
     monkeypatch.setenv("HUBBY_DB", str(tmp_path / "hubby.db"))
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_STUB", raising=False)

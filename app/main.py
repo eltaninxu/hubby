@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import re
@@ -50,8 +51,36 @@ def _client_ip(request: Request) -> str:
     if forwarded:
         # Caddy appends the real peer to whatever the client sent; the first
         # entry is attacker-controlled, the last one is not.
-        return forwarded.split(",")[-1].strip()
+        candidate = forwarded.split(",")[-1].strip()
+        try:
+            ipaddress.ip_address(candidate)
+            return candidate
+        except ValueError:
+            pass
     return request.client.host if request.client else "unknown"
+
+
+# The host and its docker networks. Deliberately not `is_private`: that also
+# covers documentation/CGNAT ranges, which we do not want to trust.
+_TRUSTED_NETWORKS = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+)
+
+
+def _can_edit_settings(ip: str, settings) -> bool:
+    """The public demo is read-only; only the host or its private network may
+    change the rules or the payout address."""
+    if settings.settings_open:
+        return True
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(address in network for network in _TRUSTED_NETWORKS)
 
 
 def _session_id(request: Request) -> str:
@@ -202,8 +231,15 @@ async def ledger_page(request: Request, flash: str | None = None):
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, flash: str | None = None):
     db: Database = request.app.state.db
+    settings = request.app.state.settings
     return templates.TemplateResponse(
-        request, "settings.html", {"flash": flash, "settings": db.get_settings()}
+        request,
+        "settings.html",
+        {
+            "flash": flash,
+            "settings": db.get_settings(),
+            "can_edit": _can_edit_settings(_client_ip(request), settings),
+        },
     )
 
 
@@ -218,6 +254,9 @@ async def save_settings(
         return _flash_redirect(
             f"Too many rule changes from this address. Try again in {retry_after}s."
         )
+
+    if not _can_edit_settings(_client_ip(request), request.app.state.settings):
+        return _flash_redirect("Settings are read-only on the public demo.")
 
     db: Database = request.app.state.db
     email = recipient_email.strip()

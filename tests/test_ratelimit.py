@@ -41,3 +41,18 @@ def test_client_ip_uses_the_last_proxy_hop():
 
     direct = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
     assert _client_ip(direct) == "127.0.0.1"
+
+
+def test_public_clients_cannot_edit_settings():
+    from types import SimpleNamespace
+
+    from app.main import _can_edit_settings
+
+    locked = SimpleNamespace(settings_open=False)
+    opened = SimpleNamespace(settings_open=True)
+
+    assert _can_edit_settings("203.0.113.9", locked) is False
+    assert _can_edit_settings("8.8.8.8", locked) is False
+    assert _can_edit_settings("172.18.0.1", locked) is True
+    assert _can_edit_settings("127.0.0.1", locked) is True
+    assert _can_edit_settings("203.0.113.9", opened) is True

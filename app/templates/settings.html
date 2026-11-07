@@ -13,7 +13,11 @@
            placeholder="you@example.com">
 
     <div class="actions">
-      <button type="submit">Save</button>
+      {% if can_edit %}
+        <button type="submit">Save</button>
+      {% else %}
+        <span class="muted small">read-only on the public demo</span>
+      {% endif %}
       <span class="muted small">updated {{ (settings.updated_at or "")[:16].replace("T", " ") }}</span>
     </div>
   </form>
