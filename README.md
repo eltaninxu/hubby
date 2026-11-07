@@ -156,6 +156,7 @@ All settings live in `.env` (see `.env.example`).
 | `HUBBY_DB` | no | SQLite path (default `data/hubby.db`) |
 | `HUBBY_SEED` | no | `0` to start with an empty ledger |
 | `HUBBY_DEMO_RESET` | no | `1` to reset an idle demo back to the seeded state |
+| `HUBBY_DAILY_REQUESTS` | no | Hard daily ceiling on the public demo (default `200`, `0` = unlimited) |
 | `PAYOUT_POLL_ATTEMPTS` / `PAYOUT_POLL_INTERVAL` | no | How long to wait for a payout to settle (default 20 × 1.5s, because sandbox payouts can take ~15–20s) |
 
 The app refuses to start if a required value is missing, and tells you which one.

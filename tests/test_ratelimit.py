@@ -17,3 +17,27 @@ def test_limiter_blocks_after_limit():
     assert allowed is False
     assert retry_after >= 1
     assert limiter.allow("api", "5.6.7.8")[0] is True
+
+
+def test_daily_budget_caps_the_day():
+    from app.ratelimit import DailyBudget
+
+    budget = DailyBudget(2)
+    assert budget.take() == (True, 1)
+    assert budget.take() == (True, 0)
+    assert budget.take() == (False, 0)
+    assert DailyBudget(0).take()[0] is True
+
+
+def test_client_ip_uses_the_last_proxy_hop():
+    from types import SimpleNamespace
+
+    from app.main import _client_ip
+
+    spoofed = SimpleNamespace(
+        headers={"x-forwarded-for": "9.9.9.9, 203.0.113.7"}, client=None
+    )
+    assert _client_ip(spoofed) == "203.0.113.7"
+
+    direct = SimpleNamespace(headers={}, client=SimpleNamespace(host="127.0.0.1"))
+    assert _client_ip(direct) == "127.0.0.1"

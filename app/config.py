@@ -52,6 +52,7 @@ class Settings:
     demo_reset: bool
     demo_reset_after_hours: float
     maintenance_seconds: float
+    daily_request_cap: int
     rate_api: tuple[int, int]
     rate_fund: tuple[int, int]
     rate_settings: tuple[int, int]
@@ -144,6 +145,7 @@ def load_settings(*, require_llm: bool = True) -> Settings:
         demo_reset=_env("HUBBY_DEMO_RESET", default="0").lower() in {"1", "true", "yes"},
         demo_reset_after_hours=number("HUBBY_DEMO_RESET_AFTER_HOURS", "12"),
         maintenance_seconds=max(30.0, number("HUBBY_MAINTENANCE_SECONDS", "1800")),
+        daily_request_cap=max(0, int(number("HUBBY_DAILY_REQUESTS", "200"))),
         rate_api=parse_limit(_env("RATE_LIMIT_API", default="40/600"), default_limit=40, default_window=600),
         rate_fund=parse_limit(_env("RATE_LIMIT_FUND", default="10/600"), default_limit=10, default_window=600),
         rate_settings=parse_limit(_env("RATE_LIMIT_SETTINGS", default="10/3600"), default_limit=10, default_window=3600),

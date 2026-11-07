@@ -42,3 +42,30 @@ class RateLimiter:
             return False, retry_after
         bucket.append(now)
         return True, 0
+
+
+class DailyBudget:
+    """A hard ceiling on how many requests the public demo serves per day.
+
+    In-memory, one process: a restart forgives the day. It exists so a stranger
+    cannot turn the demo into a free model endpoint for an afternoon.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = max(0, limit)
+        self._day: str | None = None
+        self._used = 0
+
+    @property
+    def used(self) -> int:
+        return self._used
+
+    def take(self) -> tuple[bool, int]:
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        if today != self._day:
+            self._day = today
+            self._used = 0
+        if self.limit and self._used >= self.limit:
+            return False, 0
+        self._used += 1
+        return True, max(0, self.limit - self._used)

@@ -23,7 +23,7 @@ from app.config import ConfigError, get_settings
 from app.db import Database, today_iso
 from app.llm import LLMError, HubbyBrain
 from app.paypal import PayPalError, client_from_settings, payout_error_message
-from app.ratelimit import RateLimiter
+from app.ratelimit import DailyBudget, RateLimiter
 
 log = logging.getLogger("hubby")
 
@@ -48,7 +48,9 @@ def _seed_enabled() -> bool:
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        # Caddy appends the real peer to whatever the client sent; the first
+        # entry is attacker-controlled, the last one is not.
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -112,6 +114,7 @@ async def lifespan(app: FastAPI):
     app.state.brain = HubbyBrain(settings)
     app.state.paypal = client_from_settings(settings)
     app.state.pending = {}
+    app.state.budget = DailyBudget(settings.daily_request_cap)
     app.state.limiter = RateLimiter(
         {
             "api": settings.rate_api,
@@ -325,6 +328,12 @@ async def api_request(request: Request):
             {"error": "Hubby is handling a lot right now. Try again in a minute."},
             status_code=429,
             headers={"Retry-After": str(retry_after)},
+        )
+    allowed, _remaining = request.app.state.budget.take()
+    if not allowed:
+        return JSONResponse(
+            {"error": "The public demo used its daily request budget. Try again tomorrow."},
+            status_code=429,
         )
 
     payload: dict[str, Any] = {}

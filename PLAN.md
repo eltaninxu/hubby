@@ -6,6 +6,11 @@
 > 账本分 `request / deposit / release` 三种 kind。
 > 下面第 1–18 节描述的是 **v1**(月预算 + 用户付给商户),只作历史参考。
 >
+> **线上开关(重要):** 公网 demo 按需开关,平时关着以免陌生人消耗模型额度。
+> `scripts/demo.sh on|off|status`;关掉后 Caddy 返回 502,域名还在。
+> 每日请求上限默认 200(`HUBBY_DAILY_REQUESTS`),按 IP 限流按 Caddy 追加的**最后一跳**取 IP。
+> 视频录制、评委窗口(11/11 冻结后到 11/12 截止)保持 on。
+>
 > v2 落地状态(2026-11-07):线上 `https://hubby.royola.dev` 跑 v2;验收脚本
 > `scripts/acceptance.py` 按 SPEC v2.6 重写,2026-11-07 一轮 `evidence/acceptance-v2/` 全过;
 > 离线测试 29 个;Payouts 已开通,沙箱到账约 20–60 秒,轮询窗口默认 20×1.5s(SPEC v2.9 原写 8×1.5s,实测沙箱约 17.5s 才 SUCCESS,2026-11-07 家长同意改默认);unclaimed 计入 pot 扣减。
