@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Hubby · ledger{% endblock %}
+{% block content %}
+<div class="page">
+  <div class="summary">
+    <div class="card">
+      <div class="card-head">
+        <span>This month</span>
+        <strong class="{{ 'bad' if budget.over else '' }}">{{ money(budget.used) }} <span class="muted">of {{ cap_label(budget.cap) }}</span></strong>
+      </div>
+      <div class="bar"><div class="fill {{ 'bad' if budget.over else '' }}" style="width: {{ budget.percent }}%"></div></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><span>By category</span></div>
+      <ul class="totals">
+        {% for row in budget.categories %}
+          <li><span>{{ row.category }}</span><span>{{ money(row.total) }}</span></li>
+        {% else %}
+          <li class="muted">nothing paid yet this month</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  <table class="ledger">
+    <thead>
+      <tr>
+        <th>When</th><th>Request</th><th class="num">Amount</th><th>Category</th>
+        <th>Decision</th><th>Reason</th><th>PayPal</th><th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td class="nowrap muted">{{ (e.paid_at or e.created_at)[:16].replace("T", " ") }}</td>
+        <td>{{ e.raw_text }}</td>
+        <td class="num">{{ money(e.amount_usd) }}</td>
+        <td>{{ e.category or "—" }}</td>
+        <td><span class="pill {{ e.decision }}">{{ e.decision }}</span></td>
+        <td class="reason">{{ e.reason or "—" }}</td>
+        <td class="ids">
+          {% if e.paypal_capture_id %}
+            <span title="capture id">{{ e.paypal_capture_id }}</span>
+          {% elif e.paypal_order_id %}
+            <span class="muted" title="order id">{{ e.paypal_order_id }}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td><span class="status {{ e.status }}">{{ e.status }}</span></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted empty">No requests yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

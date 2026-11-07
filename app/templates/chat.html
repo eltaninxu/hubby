@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Hubby · chat{% endblock %}
+{% block content %}
+<div class="layout">
+  <section class="chat">
+    <div class="messages" id="messages">
+      <div class="msg hubby">
+        <div class="bubble">Tell me what you want to buy. I'll check it against the rules and this month's budget.</div>
+      </div>
+    </div>
+    <form class="composer" id="composer">
+      <input id="text" name="text" placeholder='try "bubble tea $4.50"' autocomplete="off" autofocus>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </section>
+
+  <aside class="sidebar">
+    <div class="card">
+      <div class="card-head">
+        <span>This month</span>
+        <strong class="{{ 'bad' if budget.over else '' }}">{{ money(budget.used) }} <span class="muted">of {{ cap_label(budget.cap) }}</span></strong>
+      </div>
+      <div class="bar"><div class="fill {{ 'bad' if budget.over else '' }}" style="width: {{ budget.percent }}%"></div></div>
+      <ul class="totals">
+        {% for row in budget.categories %}
+          <li><span>{{ row.category }}</span><span>{{ money(row.total) }}</span></li>
+        {% else %}
+          <li class="muted">nothing paid yet this month</li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><span>Last 5</span><a class="small" href="/ledger">ledger</a></div>
+      <ul class="mini">
+        {% for e in recent %}
+          <li>
+            <span class="dot {{ e.status }}"></span>
+            <span class="mini-text">{{ e.raw_text }}</span>
+            <span class="mini-amount">{{ money(e.amount_usd) }}</span>
+          </li>
+        {% else %}
+          <li class="muted">empty</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </aside>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/chat.js"></script>{% endblock %}

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Hubby{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Hubby</a>
+    <nav>
+      <a href="/" {% if request.url.path == "/" %}class="on"{% endif %}>Chat</a>
+      <a href="/ledger" {% if request.url.path == "/ledger" %}class="on"{% endif %}>Ledger</a>
+      <a href="/settings" {% if request.url.path == "/settings" %}class="on"{% endif %}>Settings</a>
+    </nav>
+  </header>
+
+  {% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+  <main>{% block content %}{% endblock %}</main>
+
+  <footer class="foot">
+    the model argues · the code enforces · PayPal moves the money
+  </footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
