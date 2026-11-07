@@ -400,7 +400,7 @@ class Database:
                 " COALESCE(SUM(CASE WHEN kind = 'deposit' AND status = 'paid'"
                 "                 THEN amount_usd END), 0)"
                 " - COALESCE(SUM(CASE WHEN kind = 'release'"
-                "                 AND status IN ('released', 'pending')"
+                "                 AND status IN ('released', 'pending', 'unclaimed')"
                 "                 THEN amount_usd END), 0) AS balance"
                 " FROM ledger"
             ).fetchone()
@@ -421,7 +421,7 @@ class Database:
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM ledger"
-                " WHERE kind = 'release' AND status IN ('released', 'pending')"
+                " WHERE kind = 'release' AND status IN ('released', 'pending', 'unclaimed')"
                 " AND created_at LIKE ?",
                 (f"{prefix}%",),
             ).fetchone()
@@ -435,7 +435,7 @@ class Database:
                 "SELECT COALESCE(category, 'other') AS category,"
                 "       COALESCE(SUM(amount_usd), 0) AS total, COUNT(*) AS n"
                 " FROM ledger WHERE kind = 'release'"
-                "   AND status IN ('released', 'pending') AND created_at LIKE ?"
+                "   AND status IN ('released', 'pending', 'unclaimed') AND created_at LIKE ?"
                 " GROUP BY COALESCE(category, 'other') ORDER BY total DESC",
                 (f"{prefix}%",),
             ).fetchall()

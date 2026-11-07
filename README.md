@@ -84,7 +84,7 @@ gets a real answer.
 |---|---|---|
 | 1 | `fried chicken drumstick $6` | **decline** — `Pot has $0.00, you asked for $6.00. Fund it first.` The model was not asked |
 | 2 | *Fund the pot* `20` → PayPal button → pay as the sandbox buyer | back on `/`: `Pot funded +$20.00 · capture …`, pot shows `$20.00` |
-| 3 | `fried chicken drumstick $6` | **approve** → `Released $6.00 to you · payout …`; pot `$14.00`; log into the personal account and the $6.00 is in *Activity* |
+| 3 | `fried chicken drumstick $6` | **approve** → `Released $6.00 to you · payout …`; pot `$14.00`; log into the personal account and the $6.00 is in *Activity* (the payout arrives from the business account's display name — rename it in the sandbox dashboard if you want it to read "Hubby") |
 | 4 | `bubble tea $4.50` | **decline** — the rule says once every 3 days, and the ledger shows yesterday's cup |
 | 5 | `a cake` | **ask** — "How much is it?", no money moves |
 | 6 | `lunch $15` | **decline** — `Pot has $14.00, you asked for $15.00. Fund it first.` |
@@ -97,13 +97,14 @@ gets a real answer.
 
 ```python
 balance = sum(deposit rows with status paid)
-        - sum(release rows with status released or pending)
+        - sum(release rows with status released, pending or unclaimed)
 ```
 
-A payout that is still `pending` already counts as gone — the money left the pot
-the moment Hubby asked PayPal to send it. A `failed` payout does not count.
-Nothing the model says can move that number; the verdict call's `amount_usd` is
-thrown away on purpose.
+Money leaves the pot the moment Hubby asks PayPal to send it: `pending` and
+`unclaimed` count, not just `released`. Only a `failed` payout leaves the pot
+alone. If PayPal later returns an unclaimed payout, Hubby does not reconcile it
+automatically. Nothing the model says can move that number; the verdict call's
+`amount_usd` is thrown away on purpose.
 
 ## Configuration
 
@@ -122,7 +123,7 @@ All settings live in `.env` (see `.env.example`).
 | `HUBBY_DB` | no | SQLite path (default `data/hubby.db`) |
 | `HUBBY_SEED` | no | `0` to start with an empty ledger |
 | `HUBBY_DEMO_RESET` | no | `1` to reset an idle demo back to the seeded state |
-| `PAYOUT_POLL_ATTEMPTS` / `PAYOUT_POLL_INTERVAL` | no | How long to wait for a payout to settle (default 30 × 1.5s) |
+| `PAYOUT_POLL_ATTEMPTS` / `PAYOUT_POLL_INTERVAL` | no | How long to wait for a payout to settle (default 8 × 1.5s) |
 
 The app refuses to start if a required value is missing, and tells you which one.
 The recipient email can also be changed later on `/settings`.
@@ -188,8 +189,9 @@ tests/            pytest, offline
 - Sandbox only, and the code refuses to start otherwise.
 - The pot is computed from the ledger. It can differ from the real PayPal
   balance because of fees, refunds or sandbox quirks; no balance API is polled.
-- An `unclaimed` payout (recipient has no PayPal account) is recorded but is not
-  subtracted from the pot by the formula above.
+- `failed` payouts do not reduce the pot; `pending`, `released` and `unclaimed`
+  ones do, because the money has already left the sending account. A payout
+  PayPal returns after 30 days is not reconciled automatically.
 - No webhooks: pot funding is captured on the browser's return; payouts are
   polled synchronously for a bounded window, then left `pending` if PayPal is
   slow. A payout is never re-sent automatically, and the same release row is

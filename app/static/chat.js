@@ -28,9 +28,14 @@ function addUser(text) {
 
 function addThinking() {
   const row = el("div", "msg hubby");
-  row.appendChild(el("div", "bubble muted", "checking the rules and the pot…"));
+  const bubble = el("div", "bubble muted", "checking the rules and the pot…");
+  row.appendChild(bubble);
   messages.appendChild(row);
   scrollDown();
+  // The payout leg can take a few seconds; say so instead of looking frozen.
+  row._timer = setTimeout(() => {
+    bubble.textContent = "Releasing via PayPal…";
+  }, 2500);
   return row;
 }
 
@@ -126,6 +131,7 @@ async function sendRequest(text) {
       body: JSON.stringify({ text }),
     });
     const data = await response.json();
+    clearTimeout(thinking._timer);
     thinking.remove();
     if (!response.ok) {
       addError(data.error || "Something went wrong.");
@@ -133,6 +139,7 @@ async function sendRequest(text) {
       addVerdict(data);
     }
   } catch (err) {
+    clearTimeout(thinking._timer);
     thinking.remove();
     addError("Could not reach Hubby: " + err.message);
   } finally {
