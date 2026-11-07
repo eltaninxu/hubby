@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Acceptance run for SPEC section 9, driven by a real browser and real PayPal sandbox.
 
-Runs against an already-running Hubby instance (container or local dev server):
-
-    HUBBY_BASE=http://localhost:8086 \
+    HUBBY_BASE=https://hubby.royola.dev \
     PAYPAL_SANDBOX_PERSONAL_EMAIL=... PAYPAL_SANDBOX_PERSONAL_PASSWORD=... \
-    HUBBY_ACCEPT_DB=.dev/data/hubby.db \
+    HUBBY_ACCEPT_DB=data/hubby.db \
     .venv/bin/python scripts/acceptance.py
 
 Writes screenshots and report.md into evidence/acceptance/.
-Nothing here is needed to run the app; it is how we prove the app works.
+
+Two things this script cannot prove, and the report says so:
+  * item 1's clean `git clone` + `compose up` (see scripts/clone_check.sh)
+  * item 8's human read-through of the README
 """
 
 from __future__ import annotations
@@ -17,9 +18,10 @@ from __future__ import annotations
 import asyncio
 import os
 import pathlib
+import re
 import sqlite3
+import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 
 import httpx
@@ -28,9 +30,14 @@ from playwright.async_api import Page, async_playwright
 BASE = os.environ.get("HUBBY_BASE", "http://localhost:8086").rstrip("/")
 DB_PATH = pathlib.Path(os.environ.get("HUBBY_ACCEPT_DB", ".dev/data/hubby.db"))
 OUT = pathlib.Path("evidence/acceptance")
-STATE = OUT / "paypal_state.json"
 
 RESULTS: list[tuple[str, bool, str]] = []
+
+# Assembled at runtime so this file itself never contains key-looking text.
+SECRET_RE = re.compile("s" + "k-" + r"|EL[A-Za-z0-9_-]{60,}|BAA" + "2")
+SECRET_RE_HISTORY = re.compile(
+    "s" + "k-" + r"|EL[A-Za-z0-9_-]{60,}|BAA" + "2" + r"[A-Za-z0-9_-]{20,}"
+)
 
 
 def check(item: str, ok: bool, detail: str) -> None:
@@ -38,26 +45,41 @@ def check(item: str, ok: bool, detail: str) -> None:
     print(f"  [{'PASS' if ok else 'FAIL'}] {item}: {detail}")
 
 
-def db_rows(limit: int = 5) -> list[sqlite3.Row]:
+def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    try:
+    return conn
+
+
+def db_rows(limit: int = 5) -> list[sqlite3.Row]:
+    with db_conn() as conn:
         return list(conn.execute("SELECT * FROM ledger ORDER BY id DESC LIMIT ?", (limit,)))
-    finally:
-        conn.close()
 
 
 def month_paid() -> float:
-    conn = sqlite3.connect(DB_PATH)
-    try:
+    prefix = datetime.now(timezone.utc).strftime("%Y-%m") + "%"
+    with db_conn() as conn:
         total, = conn.execute(
             "SELECT COALESCE(SUM(amount_usd), 0) FROM ledger"
             " WHERE status = 'paid' AND paid_at LIKE ?",
-            (datetime.now(timezone.utc).strftime("%Y-%m") + "%",),
+            (prefix,),
         ).fetchone()
-    finally:
-        conn.close()
     return round(float(total), 2)
+
+
+def seed_day(name: str) -> str | None:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT paid_at FROM ledger WHERE raw_text = ? AND reason LIKE 'Seeded example:%'"
+            " ORDER BY id LIMIT 1",
+            (name,),
+        ).fetchone()
+    return row["paid_at"][:10] if row else None
+
+
+def reset_cap(cap: float) -> None:
+    with db_conn() as conn:
+        conn.execute("UPDATE settings SET monthly_cap_usd = ? WHERE id = 1", (cap,))
 
 
 async def shot(page: Page, name: str) -> None:
@@ -65,7 +87,6 @@ async def shot(page: Page, name: str) -> None:
 
 
 async def say(page: Page, text: str) -> str:
-    """Type a request into the chat and wait until the answer lands."""
     await page.fill("#text", text)
     await page.press("#text", "Enter")
     await page.wait_for_function(
@@ -87,16 +108,19 @@ async def login_if_needed(page: Page) -> None:
     await page.wait_for_timeout(9_000)
 
 
-async def pay_with_paypal(page: Page, context, name: str) -> str:
-    """Click the PayPal button, log in as the sandbox buyer, pay, come back."""
+async def open_paypal(page: Page, context):
     async with context.expect_page() as popup_info:
         await page.locator("a.pay").last.click()
     popup = await popup_info.value
     await popup.wait_for_load_state("domcontentloaded")
     await popup.wait_for_timeout(3_500)
     await login_if_needed(popup)
-    await shot(popup, f"{name}-paypal")
+    return popup
 
+
+async def pay_with_paypal(page: Page, context, name: str) -> str:
+    popup = await open_paypal(page, context)
+    await shot(popup, f"{name}-paypal")
     for selector in (
         "#payment-submit-btn",
         "button:has-text('完成购物')",
@@ -109,18 +133,13 @@ async def pay_with_paypal(page: Page, context, name: str) -> str:
         except Exception:
             continue
     await popup.wait_for_url("**/*flash=*", timeout=60_000)
-    final_url = popup.url
+    flash = await popup.locator(".flash").inner_text()
     await popup.close()
-    return final_url
+    return flash
 
 
-async def cancel_at_paypal(page: Page, context, name: str) -> str:
-    async with context.expect_page() as popup_info:
-        await page.locator("a.pay").last.click()
-    popup = await popup_info.value
-    await popup.wait_for_load_state("domcontentloaded")
-    await popup.wait_for_timeout(3_500)
-    await login_if_needed(popup)
+async def cancel_at_paypal(page: Page, context) -> str:
+    popup = await open_paypal(page, context)
     for text in ("取消并返回Test Store", "Cancel and return to Test Store"):
         try:
             await popup.get_by_text(text, exact=False).first.click(timeout=4_000)
@@ -128,9 +147,9 @@ async def cancel_at_paypal(page: Page, context, name: str) -> str:
         except Exception:
             continue
     await popup.wait_for_url("**/*flash=*", timeout=60_000)
-    final_url = popup.url
+    flash = await popup.locator(".flash").inner_text()
     await popup.close()
-    return final_url
+    return flash
 
 
 async def main() -> int:
@@ -139,6 +158,7 @@ async def main() -> int:
         os.environ.get("PAYPAL_SANDBOX_PERSONAL_EMAIL")
         and os.environ.get("PAYPAL_SANDBOX_PERSONAL_PASSWORD")
     )
+    reset_cap(120)
 
     async with httpx.AsyncClient(base_url=BASE, timeout=30) as http:
         health = (await http.get("/healthz")).json()
@@ -157,39 +177,49 @@ async def main() -> int:
         await page.wait_for_timeout(500)
         await shot(page, "01-home")
 
-        # 2. bubble tea gets declined and cites yesterday's cup
-        reply = await say(page, "bubble tea $4.50")
+        # 2. bubble tea declined, citing the last cup and the 3 day rule
+        last_cup = seed_day("bubble tea")
+        await say(page, "bubble tea $4.50")
         row = db_rows(1)[0]
         check(
             "2. bubble tea declined, citing the last cup and 3 days",
             row["decision"] == "decline"
             and row["status"] == "declined"
-            and "3 days" in row["reason"]
-            and "2026-11-0" in row["reason"],
+            and "3 day" in row["reason"]
+            and last_cup is not None
+            and last_cup in row["reason"],
             row["reason"][:120],
         )
         await shot(page, "02-bubble-tea")
 
         # 3. fried chicken approved, paid for real
         if personal_ready:
-            reply = await say(page, "fried chicken drumstick $6")
+            baseline = month_paid()
+            await say(page, "fried chicken drumstick $6")
             approve_button = await page.locator("a.pay").count()
             check(
                 "3a. fried chicken approved with a PayPal button",
-                "approve" in reply.lower() and approve_button > 0,
-                reply[:110].replace("\n", " | "),
+                approve_button > 0,
+                f"pay buttons on page: {approve_button}",
             )
             await shot(page, "03-chicken-approved")
             try:
-                url = await pay_with_paypal(page, context, "03-pay")
+                flash = await pay_with_paypal(page, context, "03-pay")
                 await page.goto(BASE + "/", wait_until="networkidle")
                 paid_row = db_rows(1)[0]
+                expected_total = round(baseline + 6.0, 2)
                 check(
                     "3b. buyer paid, capture landed, ledger is paid",
                     paid_row["status"] == "paid"
                     and bool(paid_row["paypal_capture_id"])
-                    and month_paid() == 11.70,
-                    f"capture={paid_row['paypal_capture_id']} month=${month_paid():.2f}",
+                    and month_paid() == expected_total,
+                    f"capture={paid_row['paypal_capture_id']} month=${month_paid():.2f}"
+                    f" baseline=${baseline:.2f}",
+                )
+                check(
+                    "3c. flash shows Paid and the capture id",
+                    "Paid" in flash and paid_row["paypal_capture_id"][:10] in flash,
+                    flash[:80],
                 )
                 await shot(page, "03-paid")
             except Exception as exc:  # noqa: BLE001
@@ -198,7 +228,7 @@ async def main() -> int:
             check("3. fried chicken approved and paid", False, "no sandbox buyer credentials")
 
         # 4. "a cake" asks for the price and never builds an order
-        reply = await say(page, "a cake")
+        await say(page, "a cake")
         row = db_rows(1)[0]
         check(
             "4. 'a cake' asks how much, no order",
@@ -215,9 +245,10 @@ async def main() -> int:
         await page.click("button[type=submit]")
         await page.wait_for_timeout(800)
         await page.goto(BASE + "/", wait_until="networkidle")
-        reply = await say(page, "lunch $8")
+        await say(page, "lunch $8")
         row = db_rows(1)[0]
-        expected = f"Hard cap: ${month_paid():.2f} of $7 used this month"
+        paid_now = month_paid()
+        expected = f"Hard cap: ${paid_now:.2f} of $7 used this month"
         check(
             "5. hard cap declines with fixed code text",
             row["decision"] == "decline" and row["reason"] == expected,
@@ -233,7 +264,7 @@ async def main() -> int:
         await page.goto(BASE + "/", wait_until="networkidle")
 
         # 6. one sweet thing per day
-        reply = await say(page, "dessert $5")
+        await say(page, "dessert $5")
         row = db_rows(1)[0]
         check(
             "6. dessert declined citing one sweet thing per day",
@@ -244,15 +275,17 @@ async def main() -> int:
 
         # 7. buyer cancels at PayPal
         if personal_ready:
-            reply = await say(page, "coffee $3")
+            await say(page, "coffee $3")
             before = month_paid()
             try:
-                url = await cancel_at_paypal(page, context, "07-cancel")
+                flash = await cancel_at_paypal(page, context)
                 await page.goto(BASE + "/", wait_until="networkidle")
                 row = db_rows(1)[0]
                 check(
                     "7. cancel leaves the row cancelled and the month total unchanged",
-                    row["status"] == "cancelled" and month_paid() == before,
+                    row["status"] == "cancelled"
+                    and month_paid() == before
+                    and "Cancelled" in flash,
                     f"status={row['status']} month=${month_paid():.2f}",
                 )
                 await shot(page, "07-cancelled")
@@ -265,15 +298,12 @@ async def main() -> int:
         else:
             check("7. cancel flow", False, "no sandbox buyer credentials")
 
-        # ledger evidence
         await page.goto(BASE + "/ledger", wait_until="networkidle")
         await shot(page, "08-ledger")
-
         await browser.close()
 
-    # 9. no secrets in the repo
-    markers = ("s" + "k-", "BAA" + "2", "EL" + "A" * 60)
-    hits: list[str] = []
+    # 9. no secrets in the working tree or anywhere in git history
+    tree_hits: list[str] = []
     for path in pathlib.Path(".").rglob("*"):
         if any(
             part in {".git", ".venv", ".dev", "data", "evidence", "__pycache__"}
@@ -286,9 +316,26 @@ async def main() -> int:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if any(marker in text for marker in markers):
-            hits.append(str(path))
-    check("9. no key material in the repo", not hits, f"hits={hits}" if hits else "clean")
+        if SECRET_RE.search(text):
+            tree_hits.append(str(path))
+
+    history_hits: list[str] = []
+    try:
+        log = subprocess.run(
+            ["git", "log", "-p", "--all"], capture_output=True, text=True, timeout=120
+        ).stdout
+        for line in log.splitlines():
+            if SECRET_RE_HISTORY.search(line):
+                history_hits.append(line.strip()[:120])
+                break
+    except Exception:  # noqa: BLE001
+        history_hits.append("(could not read git history)")
+
+    check(
+        "9. no key material in the repo (tree + history)",
+        not tree_hits and not history_hits,
+        f"tree={tree_hits} history={history_hits}" if (tree_hits or history_hits) else "clean",
+    )
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -297,13 +344,22 @@ async def main() -> int:
         "",
         f"- when: {stamp}",
         f"- target: {BASE}",
-        f"- result: **{passed}/{len(RESULTS)} passed**",
+        f"- result: **{passed}/{len(RESULTS)} automated checks passed**",
         "",
-        "| item | result | detail |",
+        "| check | result | detail |",
         "|---|---|---|",
     ]
     for item, ok, detail in RESULTS:
         lines.append(f"| {item} | {'PASS' if ok else 'FAIL'} | {detail.replace('|', '/')} |")
+    lines += [
+        "",
+        "Not automated here:",
+        "- **item 1 (clean clone + compose up)** — see `scripts/clone_check.sh` and its output.",
+        "- **item 8 (README walk-through by a human)** — still needs a person who has never",
+        "  seen this project to follow the README end to end.",
+        "- **PayPal seller dashboard** — the capture id in the ledger is the evidence; checking",
+        "  the seller dashboard is a manual glance.",
+    ]
     (OUT / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(f"\n{passed}/{len(RESULTS)} passed -> {OUT / 'report.md'}")

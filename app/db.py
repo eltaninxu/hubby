@@ -93,25 +93,84 @@ class Database:
                     self._seed_ledger(conn)
 
     @staticmethod
-    def _seed_ledger(conn: sqlite3.Connection) -> None:
-        now = utcnow()
+    def _seed_rows(now: datetime) -> list[tuple[str, str, float, str, str]]:
         today = now.date()
         yesterday = today - timedelta(days=1)
 
-        def paid_at(day) -> datetime:
-            stamp = datetime(day.year, day.month, day.day, 9, 0, tzinfo=timezone.utc)
-            return min(stamp, now)
+        def stamp(day) -> str:
+            moment = datetime(day.year, day.month, day.day, 9, 0, tzinfo=timezone.utc)
+            return iso(min(moment, now))
 
-        rows = [
-            (iso(paid_at(yesterday)), "bubble tea", 4.50, "drink", "Seeded example: yesterday's bubble tea."),
-            (iso(paid_at(today)), "Pepsi", 1.20, "sweets", "Seeded example: a sweet already paid today."),
+        return [
+            (
+                stamp(yesterday),
+                "bubble tea",
+                4.50,
+                "drink",
+                "Seeded example: yesterday's bubble tea.",
+            ),
+            (
+                stamp(today),
+                "Pepsi",
+                1.20,
+                "sweets",
+                "Seeded example: a sweet already paid today.",
+            ),
         ]
-        for created_at, raw, amount, category, reason in rows:
+
+    @classmethod
+    def _seed_ledger(cls, conn: sqlite3.Connection) -> None:
+        for created_at, raw, amount, category, reason in cls._seed_rows(utcnow()):
             conn.execute(
                 "INSERT INTO ledger (created_at, raw_text, amount_usd, category, decision,"
                 " reason, status, paid_at) VALUES (?, ?, ?, ?, 'approve', ?, 'paid', ?)",
                 (created_at, raw, amount, category, reason, created_at),
             )
+
+    def refresh_seed_dates(self) -> bool:
+        """Keep the demo receipts relative to today, even weeks after first boot.
+
+        The hosted demo must still answer "no" to bubble tea on the day a judge
+        visits, so the two seeded rows slide forward instead of ageing out.
+        """
+        now = utcnow()
+        targets = {name: created for created, name, *_ in self._seed_rows(now)}
+        changed = False
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, raw_text, created_at FROM ledger"
+                " WHERE reason LIKE 'Seeded example:%' ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                created = targets.get(row["raw_text"])
+                if created and row["created_at"] != created:
+                    conn.execute(
+                        "UPDATE ledger SET created_at = ?, paid_at = ? WHERE id = ?",
+                        (created, created, row["id"]),
+                    )
+                    changed = True
+        return changed
+
+    def reset_demo(self, monthly_cap_usd: float) -> None:
+        """Wipe the household back to the seeded demo state."""
+        with self.connect() as conn:
+            conn.execute("DELETE FROM ledger")
+            conn.execute(
+                "UPDATE settings SET rules = ?, monthly_cap_usd = ?, updated_at = ? WHERE id = 1",
+                (DEFAULT_RULES, monthly_cap_usd, iso(utcnow())),
+            )
+            self._seed_ledger(conn)
+
+    def hours_since_last_entry(self) -> float:
+        with self.connect() as conn:
+            row = conn.execute("SELECT MAX(created_at) AS latest FROM ledger").fetchone()
+        if not row or not row["latest"]:
+            return 1e9
+        try:
+            latest = datetime.fromisoformat(row["latest"])
+        except ValueError:
+            return 1e9
+        return (utcnow() - latest).total_seconds() / 3600
 
     # -- settings -----------------------------------------------------------
     def get_settings(self) -> dict[str, Any]:
@@ -222,6 +281,17 @@ class Database:
             row = conn.execute(
                 "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM ledger"
                 " WHERE status = 'paid' AND paid_at LIKE ?",
+                (f"{prefix}%",),
+            ).fetchone()
+        return round(float(row["total"]), 2)
+
+    def month_pending_usd(self, prefix: str | None = None) -> float:
+        """Money already promised to PayPal but not captured yet."""
+        prefix = prefix or month_prefix()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM ledger"
+                " WHERE status = 'pending' AND created_at LIKE ?",
                 (f"{prefix}%",),
             ).fetchone()
         return round(float(row["total"]), 2)

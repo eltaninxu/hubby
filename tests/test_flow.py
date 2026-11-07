@@ -167,3 +167,72 @@ def test_settings_validation(client, db):
 def test_empty_request_is_rejected(client):
     response = client.post("/api/request", json={"text": "   "})
     assert response.status_code == 400
+
+
+def test_pending_orders_reserve_the_cap(client, brain, db, paypal):
+    """Two approved-but-unpaid orders must not both fit under the cap."""
+    brain.extract_result = {"amount_usd": 60.0, "item": "party pizza", "category": "food"}
+    brain.decide_result = {"decision": "approve", "reason": "Meals are fine.", "category": "food"}
+
+    first = ask(client, "party pizza for the team $60 because farewell lunch")
+    second = ask(client, "catering tray $60 because the offsite is today")
+
+    assert first["decision"] == "approve"
+    assert second["decision"] == "decline"
+    assert second["reason"] == "Hard cap: $65.70 of $120 committed this month"
+    assert len(paypal.orders) == 1
+    assert db.month_paid_usd() == 5.70
+
+
+def test_capture_refused_when_cap_lowered_after_approval(client, brain, db, paypal):
+    brain.decide_result = {"decision": "approve", "reason": "ok", "category": "food"}
+    result = ask(client, "lunch $6")
+    assert result["status"] == "pending"
+
+    client.post("/settings", data={"rules": rules_of(db), "monthly_cap_usd": "7"})
+    client.get(f"/paypal/return?token={result['order_id']}")
+
+    row = db.by_order_id(result["order_id"])
+    assert row["status"] == "capture_failed"
+    assert row["reason"].startswith("Hard cap: $5.70 of $7 used this month")
+    assert "refused at capture" in row["reason"]
+    assert paypal.captured == []
+    assert db.month_paid_usd() == 5.70
+
+
+def test_seed_dates_refresh_to_today(client, db):
+    from datetime import datetime, timedelta, timezone
+
+    old = "2020-01-01T09:00:00+00:00"
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE ledger SET created_at = ?, paid_at = ? WHERE reason LIKE 'Seeded example:%'",
+            (old, old),
+        )
+
+    assert db.refresh_seed_dates() is True
+
+    days = {row["raw_text"]: row["created_at"][:10] for row in db.all_entries()}
+    now = datetime.now(timezone.utc)
+    assert days["bubble tea"] == (now.date() - timedelta(days=1)).isoformat()
+    assert days["Pepsi"] == now.date().isoformat()
+    assert db.refresh_seed_dates() is False
+
+
+def test_demo_reset_restores_the_seeded_household(client, db):
+    db.save_settings("Changed rules.", 7)
+    db.add_entry(
+        raw_text="junk",
+        amount_usd=1.0,
+        category="other",
+        decision="approve",
+        reason="junk",
+        status="paid",
+    )
+
+    db.reset_demo(120)
+
+    assert db.get_settings()["rules"].startswith("One sweet thing per day")
+    assert db.get_settings()["monthly_cap_usd"] == 120
+    assert len(db.all_entries()) == 2
+    assert db.month_paid_usd() == 5.70

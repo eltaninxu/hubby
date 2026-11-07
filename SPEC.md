@@ -45,7 +45,7 @@
 
 - Python 3.12,FastAPI + Uvicorn,Jinja2 模板 + 一点原生 JS(不上前端框架)
 - SQLite(单文件 `data/hubby.db`),用 `sqlite3` 标准库或 SQLModel 二选一,选了就不换
-- LLM:Anthropic Messages API,`anthropic` 官方 SDK,tool use 拿结构化裁决。默认模型 `claude-sonnet-5-5`,环境变量 `LLM_MODEL` 可换;`ANTHROPIC_BASE_URL` 可设(走家里 LiteLLM 时用)。写代码前先加载 `claude-api` skill 看当前 SDK 用法,别凭记忆写。
+- LLM:任意 OpenAI 兼容接口(`openai` 官方 SDK),function calling 拿结构化裁决。默认模型 `gpt-5.4-mini`,环境变量 `LLM_MODEL` 可换;`OPENAI_BASE_URL` 可设(走家里 LiteLLM / Ollama `/v1` 时用)。
 - PayPal:直接 `httpx` 打 REST,不引 SDK。沙箱 base `https://api-m.sandbox.paypal.com`。
   - `POST /v1/oauth2/token`,Basic(client_id:secret),`grant_type=client_credentials`,token 缓存到过期前 60s
   - `POST /v2/checkout/orders`,body:`intent: CAPTURE`,`purchase_units[0].amount = {currency_code: USD, value: "4.50"}`,`purchase_units[0].description` = 用户原话截 127 字,`payment_source.paypal.experience_context = {return_url, cancel_url, user_action: PAY_NOW}`;从响应 `links` 里取 `rel == "payer-action"`(没有就取 `approve`)
@@ -149,10 +149,11 @@ PAYPAL_ENV=sandbox
 PAYPAL_CLIENT_ID=
 PAYPAL_CLIENT_SECRET=
 PAYPAL_RETURN_BASE=http://localhost:8080      # 部署时换成 https://hubby.royola.dev
-ANTHROPIC_API_KEY=
-ANTHROPIC_BASE_URL=                            # 可空
-LLM_MODEL=claude-sonnet-5-5
+OPENAI_API_KEY=
+OPENAI_BASE_URL=                               # 可空;填 LiteLLM / Ollama 的 /v1 即可换后端
+LLM_MODEL=gpt-5.4-mini
 MONTHLY_CAP_USD=120
+HUBBY_PORT=8080                                # 部署时写 127.0.0.1:8085,别暴露公网
 ```
 
 真钥匙在 Eltanin 那边 `~/.config/eltanin/secrets.env`(`PAYPAL_SANDBOX_CLIENT_ID` / `PAYPAL_SANDBOX_SECRET`,沙箱买家卖家号也在),跑腿要用就从那儿读,**不复制进仓库目录,不贴群里**。

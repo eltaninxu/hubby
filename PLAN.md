@@ -254,15 +254,31 @@ reason = f"Hard cap: ${used:.2f} of ${cap:g} used this month"
 
 - `Dockerfile`:`python:3.12-slim` → 装依赖 → 非 root 用户 `hubby` → `EXPOSE 8080` → `uvicorn app.main:app --host 0.0.0.0 --port 8080`;带 `HEALTHCHECK` 打 `/healthz`。
 - `docker-compose.yml`:build `.`,`env_file: .env`,`ports: "${HUBBY_PORT:-8080}:8080"`,`volumes: ./data:/app/data`,`restart: unless-stopped`。
-- 本机常驻:`HUBBY_PORT=8085 docker compose up -d`,给 Royola 的 Caddy 片段:
+- Caddy 已经由 Royola 上线,**跑在容器里**,所以反代按 docker 服务名连,不写 `127.0.0.1`:
 
 ```
 hubby.royola.dev {
-    reverse_proxy 127.0.0.1:8085
+    reverse_proxy hubby:8080
 }
 ```
 
-- 部署后 `.env` 里 `PAYPAL_RETURN_BASE=https://hubby.royola.dev`,重启。
+部署步骤(本机 8085 只绑回环,公网入口只有 Caddy):
+
+1. `hubby` 的 `.env` 里写:
+   ```
+   PAYPAL_RETURN_BASE=https://hubby.royola.dev
+   HUBBY_PORT=127.0.0.1:8085
+   LLM_GATEWAY_NETWORK=lucifer_gateway_default
+   HUBBY_DEMO_RESET=1
+   ```
+   `HUBBY_PORT` 带主机前缀,让容器端口只发布到回环,不暴露到外网;`HUBBY_DEMO_RESET=1` 让公开 demo 在闲置 12 小时后回到种子状态。
+2. 起服务(用网关网络 override,服务名保持 `hubby`):
+   ```
+   docker compose -f docker-compose.yml -f docker-compose.with-llm-gateway.yml up -d --build
+   ```
+3. 验:`curl https://hubby.royola.dev/healthz` 回 200;再用公网地址真付一笔,确认 PayPal 跳得回来。
+
+⚠ `lucifer_gateway_default` 只用来让 Caddy 连到 hubby,不要动那个网络上的其他容器。
 
 ## 14. 测试与自动验收
 

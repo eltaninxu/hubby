@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,11 +15,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.budget import cap_label, exceeds_cap, hard_cap_reason, money
+from app.budget import assess_cap, cap_label, hard_cap_reason, money, reserved_reason
 from app.config import ConfigError, get_settings
 from app.db import Database, today_iso
 from app.llm import LLMError, HubbyBrain
 from app.paypal import PayPalError, client_from_settings
+from app.ratelimit import RateLimiter
+
+log = logging.getLogger("hubby")
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -29,6 +34,32 @@ def _seed_enabled() -> bool:
     return os.environ.get("HUBBY_SEED", "1").strip().lower() not in {"0", "false", "no"}
 
 
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def _maintenance(app: FastAPI) -> None:
+    """Keep the demo honest: slide seed dates forward, reset an abandoned demo."""
+    settings = app.state.settings
+    while True:
+        await asyncio.sleep(settings.maintenance_seconds)
+        try:
+            db: Database = app.state.db
+            if (
+                settings.demo_reset
+                and db.hours_since_last_entry() >= settings.demo_reset_after_hours
+            ):
+                db.reset_demo(settings.monthly_cap_usd)
+                log.info("demo reset: household returned to seeded state")
+            elif db.refresh_seed_dates():
+                log.info("seed dates refreshed")
+        except Exception:  # noqa: BLE001 - a background janitor must not die
+            log.exception("maintenance failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -38,11 +69,30 @@ async def lifespan(app: FastAPI):
 
     db = Database(settings.db_path)
     db.init(settings.monthly_cap_usd, seed=_seed_enabled())
+
+    if settings.demo_reset and db.hours_since_last_entry() >= settings.demo_reset_after_hours:
+        db.reset_demo(settings.monthly_cap_usd)
+        log.info("demo reset on boot: household returned to seeded state")
+    else:
+        db.refresh_seed_dates()
+
     app.state.settings = settings
     app.state.db = db
     app.state.brain = HubbyBrain(settings)
     app.state.paypal = client_from_settings(settings)
-    yield
+    app.state.limiter = RateLimiter(
+        {
+            "api": settings.rate_api,
+            "settings": settings.rate_settings,
+            "global": settings.rate_global,
+        }
+    )
+
+    maintenance = asyncio.create_task(_maintenance(app))
+    try:
+        yield
+    finally:
+        maintenance.cancel()
 
 
 app = FastAPI(title="Hubby", lifespan=lifespan)
@@ -57,16 +107,21 @@ def _flash_redirect(message: str) -> RedirectResponse:
 def _ledger_line(entry: dict[str, Any]) -> str:
     stamp = (entry.get("paid_at") or entry.get("created_at") or "")[:10]
     category = entry.get("category") or "other"
-    return f"{stamp} | {entry.get('raw_text', '')} | {money(entry.get('amount_usd'))} | {category} | {entry.get('status')}"
+    return (
+        f"{stamp} | {entry.get('raw_text', '')} | {money(entry.get('amount_usd'))}"
+        f" | {category} | {entry.get('status')}"
+    )
 
 
 def _budget_view(db: Database) -> dict[str, Any]:
     row = db.get_settings()
     used = db.month_paid_usd()
+    pending = db.month_pending_usd()
     cap = float(row.get("monthly_cap_usd") or 0)
     percent = min(100.0, round(used / cap * 100, 1)) if cap > 0 else 0.0
     return {
         "used": used,
+        "pending": pending,
         "cap": cap,
         "percent": percent,
         "over": used > cap,
@@ -105,6 +160,12 @@ async def settings_page(request: Request, flash: str | None = None):
 
 @app.post("/settings")
 async def save_settings(request: Request, rules: str = Form(""), monthly_cap_usd: str = Form("")):
+    allowed, retry_after = request.app.state.limiter.allow("settings", _client_ip(request))
+    if not allowed:
+        return _flash_redirect(
+            f"Too many rule changes from this address. Try again in {retry_after}s."
+        )
+
     db: Database = request.app.state.db
     try:
         cap = round(float(monthly_cap_usd.strip()), 2)
@@ -121,6 +182,22 @@ async def save_settings(request: Request, rules: str = Form(""), monthly_cap_usd
 # -- purchase flow ---------------------------------------------------------
 @app.post("/api/request")
 async def api_request(request: Request):
+    limiter: RateLimiter = request.app.state.limiter
+    allowed, retry_after = limiter.allow("api", _client_ip(request))
+    if not allowed:
+        return JSONResponse(
+            {"error": f"Too many requests from this address. Try again in {retry_after}s."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+    allowed, retry_after = limiter.allow("global", "household")
+    if not allowed:
+        return JSONResponse(
+            {"error": "Hubby is handling a lot right now. Try again in a minute."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     payload: dict[str, Any] = {}
     try:
         payload = await request.json()
@@ -171,12 +248,17 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "ledger_id": entry_id,
         }
 
-    # 3. hard cap, in code, before the model gets a say
+    # 3. hard cap, in code, before the model gets a say. Pending orders reserve
+    #    budget too, otherwise two approved-but-unpaid orders can overshoot.
     settings_row = db.get_settings()
     cap = float(settings_row.get("monthly_cap_usd") or 0)
-    over, used = exceeds_cap(db, float(amount), cap)
-    if over:
-        reason = hard_cap_reason(used, cap)
+    check = assess_cap(db, float(amount), cap)
+    if check.over_paid or check.over_reserved:
+        reason = (
+            hard_cap_reason(check.paid, cap)
+            if check.over_paid
+            else reserved_reason(check.committed, cap)
+        )
         entry_id = db.add_entry(
             raw_text=text,
             amount_usd=float(amount),
@@ -202,7 +284,7 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
         request_text=text,
         parsed=parsed,
         monthly_cap=cap,
-        month_used=used,
+        month_used=check.paid,
     )
 
     # 5. decline / ask stop here
@@ -261,6 +343,18 @@ async def paypal_return(request: Request, token: str = ""):
 
     if entry["status"] != "pending":
         return _flash_redirect(f"That order is {entry['status']}; nothing was captured.")
+
+    # Second cap check: the rules may have changed between approval and payment.
+    settings_row = db.get_settings()
+    cap = float(settings_row.get("monthly_cap_usd") or 0)
+    amount = float(entry.get("amount_usd") or 0)
+    paid_now = db.month_paid_usd()
+    if round(paid_now + amount, 2) > round(cap, 2):
+        reason = hard_cap_reason(paid_now, cap) + " — refused at capture; authorization left uncaptured"
+        db.mark_capture_failed(entry["id"], reason)
+        return _flash_redirect(
+            f"Capture refused. {hard_cap_reason(paid_now, cap)} — nothing was charged."
+        )
 
     try:
         capture_id = await request.app.state.paypal.capture(token)

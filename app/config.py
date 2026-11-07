@@ -13,6 +13,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from app.ratelimit import parse_limit
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # .env next to this repo; real values never live in the repo itself.
@@ -45,6 +47,12 @@ class Settings:
     monthly_cap_usd: float
     db_path: Path
     llm_stub: bool
+    demo_reset: bool
+    demo_reset_after_hours: float
+    maintenance_seconds: float
+    rate_api: tuple[int, int]
+    rate_settings: tuple[int, int]
+    rate_global: tuple[int, int]
 
     @property
     def paypal_api(self) -> str:
@@ -104,6 +112,12 @@ def load_settings(*, require_llm: bool = True) -> Settings:
 
     db_path = Path(_env("HUBBY_DB", default=str(ROOT / "data" / "hubby.db")))
 
+    def number(name: str, default: str) -> float:
+        try:
+            return float(_env(name, default=default))
+        except ValueError:
+            return float(default)
+
     return Settings(
         paypal_env=paypal_env,
         paypal_client_id=client_id,
@@ -117,6 +131,12 @@ def load_settings(*, require_llm: bool = True) -> Settings:
         monthly_cap_usd=monthly_cap,
         db_path=db_path,
         llm_stub=_env("LLM_STUB", default="").lower() in {"1", "true", "yes"},
+        demo_reset=_env("HUBBY_DEMO_RESET", default="0").lower() in {"1", "true", "yes"},
+        demo_reset_after_hours=number("HUBBY_DEMO_RESET_AFTER_HOURS", "12"),
+        maintenance_seconds=max(30.0, number("HUBBY_MAINTENANCE_SECONDS", "1800")),
+        rate_api=parse_limit(_env("RATE_LIMIT_API", default="40/600"), default_limit=40, default_window=600),
+        rate_settings=parse_limit(_env("RATE_LIMIT_SETTINGS", default="10/3600"), default_limit=10, default_window=3600),
+        rate_global=parse_limit(_env("RATE_LIMIT_GLOBAL", default="600/3600"), default_limit=600, default_window=3600),
     )
 
 
