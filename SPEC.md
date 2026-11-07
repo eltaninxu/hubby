@@ -5,6 +5,10 @@
 
 ---
 
+> **线上服务默认关着(Royola 11/07 定)。** 公网 URL 谁都能打,每句话花她的 LLM 额度。要用(录视频、跑线上验收、11/12 提交)时起,用完停,别让它过夜:
+> `cd /home/ubuntu/hubby && docker compose -f docker-compose.yml -f docker-compose.with-llm-gateway.yml up -d` / `… stop`。
+> 评委那边先给 `docker compose up`,托管 URL 提交当天再开。
+
 ## v2 变更(2026-11-07 晚,Royola 拍板):Hubby holds the money
 
 v1 已经做完并上线(https://hubby.royola.dev,commit `bde7a46`),验收 10/10。但 v1 的钱走向有个说不圆的地方:批了之后用户付 $6 给 **Hubby 的商户号**,可 Hubby 不是卖东西的,PayPal 在里面只是个收据机。评委问一句"这跟 PayPal 有啥关系"就站不住。
