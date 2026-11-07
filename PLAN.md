@@ -277,7 +277,7 @@ hubby.royola.dev {
 ## 15. 安全 / 验收 9
 
 - `.gitignore`:`data/`、`.env`、`__pycache__/`、`*.pyc`、`evidence/`、`.venv/`。
-- 提交前跑 `grep -rE "sk-|EL[A-Za-z0-9_-]{60,}|BAA2"` 必须零命中(写进 README 的 dev 小节)。
+- 提交前做密钥扫描:字母 s、k 加连字符的前缀、`EL` 开头 60 位以上的串、PayPal 的 `BAA` 开头(后接 `2`)的客户端 id,必须零命中。
 - 密钥只从 `~/.config/eltanin/secrets.env` **source 进当前 shell**,不 `cp` 进仓库;smoke 脚本读环境变量。
 - MIT LICENSE,版权人写 "Hubby contributors"。
 

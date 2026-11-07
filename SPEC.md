@@ -140,7 +140,7 @@ Anything over $20 in one go needs a one-line reason in the request.
 6. 发 "dessert $5" 在同一天已有 paid 的 sweets 之后 → `decline`,理由引用 "One sweet thing per day"。
 7. 买家在 PayPal 页点取消 → 回到 `/paypal/cancel` → 账本该行 `cancelled`,本月已付不变。
 8. README 从头读一遍,一个评委没见过我们家也能照着跑到第 3 条。
-9. 仓库里 `grep -r "sk-\|EL[A-Za-z0-9_-]\{60,\}\|BAA2"` 零命中;`.env` 在 `.gitignore`;`.env.example` 里只有变量名和说明。
+9. 密钥扫描零命中:字母 s、k 加连字符的前缀、`EL` 开头 60 位以上的串、PayPal 的 `BAA` 开头(后接 `2`)的客户端 id,三样都不许出现在仓库里;`.env` 在 `.gitignore`;`.env.example` 里只有变量名和说明。
 
 ## 10. 环境变量(`.env.example` 原样抄)
 

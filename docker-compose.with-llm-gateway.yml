@@ -1,0 +1,18 @@
+# Optional: join an existing Docker network that hosts a LiteLLM (or any
+# OpenAI-compatible) gateway, so the container can reach it by service name.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.with-llm-gateway.yml up -d
+#
+# Then set OPENAI_BASE_URL=http://litellm:4000/v1 in .env and point
+# LLM_GATEWAY_NETWORK at the network the gateway lives on.
+
+services:
+  hubby:
+    networks:
+      - default
+      - llm
+
+networks:
+  llm:
+    external: true
+    name: ${LLM_GATEWAY_NETWORK:-litellm_default}

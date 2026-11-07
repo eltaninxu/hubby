@@ -135,6 +135,25 @@ set -a; . ./.env; set +a
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
+## Using a local model gateway
+
+If you already run LiteLLM (or anything else that speaks the OpenAI API) in
+Docker, join its network so the container can reach it by service name:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.with-llm-gateway.yml up -d
+```
+
+Then in `.env`:
+
+```
+OPENAI_BASE_URL=http://litellm:4000/v1
+LLM_MODEL=deepseek-chat
+```
+
+and set `LLM_GATEWAY_NETWORK` to the network your gateway is on
+(default `litellm_default`).
+
 ## Tests
 
 ```bash
