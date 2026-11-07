@@ -101,6 +101,12 @@ def load_settings(*, require_llm: bool = True) -> Settings:
             "Missing required env var: OPENAI_API_KEY. "
             "Copy .env.example to .env and fill it in."
         )
+    llm_model = _env("LLM_MODEL")
+    if require_llm and not llm_model:
+        raise ConfigError(
+            "Missing required env var: LLM_MODEL. Set it to a chat model your "
+            "endpoint actually serves and that supports tool calling."
+        )
 
     cap_raw = _env("MONTHLY_CAP_USD", default="120")
     try:
@@ -127,7 +133,7 @@ def load_settings(*, require_llm: bool = True) -> Settings:
         ).rstrip("/"),
         openai_api_key=api_key,
         openai_base_url=_env("OPENAI_BASE_URL") or None,
-        llm_model=_env("LLM_MODEL", default="gpt-5.4-mini"),
+        llm_model=llm_model,
         monthly_cap_usd=monthly_cap,
         db_path=db_path,
         llm_stub=_env("LLM_STUB", default="").lower() in {"1", "true", "yes"},

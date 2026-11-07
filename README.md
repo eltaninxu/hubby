@@ -65,7 +65,7 @@ You need Docker, a PayPal **sandbox** REST app, and a sandbox **personal**
    git clone https://github.com/eltaninxu/hubby.git
    cd hubby
    cp .env.example .env
-   $EDITOR .env          # fill PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, OPENAI_API_KEY
+   $EDITOR .env          # fill PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, OPENAI_API_KEY, LLM_MODEL
    ```
    `OPENAI_API_KEY` can be any OpenAI-compatible endpoint; set `OPENAI_BASE_URL`
    if it isn't `api.openai.com`.
@@ -119,7 +119,7 @@ All settings live in `.env` (see `.env.example`).
 | `PAYPAL_RETURN_BASE` | yes | Public base URL PayPal returns to, e.g. `http://localhost:8080` |
 | `OPENAI_API_KEY` | yes | Key for any OpenAI-compatible endpoint |
 | `OPENAI_BASE_URL` | no | e.g. `http://localhost:4000/v1` for LiteLLM, or an Ollama `/v1` |
-| `LLM_MODEL` | no | Default `gpt-5.4-mini` |
+| `LLM_MODEL` | yes | A chat model your endpoint actually serves; it must support tool calling (e.g. `deepseek-chat` on LiteLLM) |
 | `MONTHLY_CAP_USD` | no | Seed cap on first run (default `120`); after that use `/settings` |
 | `HUBBY_PORT` | no | Host port for compose (default `8080`) |
 | `HUBBY_DB` | no | SQLite path (default `data/hubby.db`) |
