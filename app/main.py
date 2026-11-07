@@ -340,8 +340,6 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
         today=today_iso(),
         request_text=text,
         parsed=parsed,
-        monthly_cap=cap,
-        month_used=check.paid,
     )
 
     # 5. decline / ask stop here

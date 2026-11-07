@@ -14,7 +14,11 @@ set -euo pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel)
 NAME=${CLONE_NAME:-hubby-clone-check}
 PORT=${CLONE_PORT:-8099}
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/hubby-clone.XXXXXX")
+# Must live where the docker daemon can see it: a private /tmp in a sandbox is
+# invisible to the daemon, which silently creates a root-owned empty data dir.
+WORK_ROOT=${CLONE_WORK_ROOT:-$REPO_ROOT/.dev}
+mkdir -p "$WORK_ROOT"
+WORK=$(mktemp -d "$WORK_ROOT/hubby-clone.XXXXXX")
 COMPOSE=(docker compose -p "$NAME" -f docker-compose.yml)
 if [ "${CLONE_WITH_GATEWAY:-0}" = "1" ]; then
   COMPOSE+=(-f docker-compose.with-llm-gateway.yml)
@@ -44,6 +48,8 @@ LLM_GATEWAY_NETWORK=${LLM_GATEWAY_NETWORK:-litellm_default}
 EOF
 chmod 600 .env
 
+mkdir -p data && chmod 777 data   # container runs as uid 10001
+
 echo "== compose up (build from the clone)"
 HUBBY_PORT="127.0.0.1:${PORT}" "${COMPOSE[@]}" up -d --build >/dev/null
 
@@ -59,6 +65,8 @@ if [ "$code" = "200" ]; then
   echo "  [PASS] healthz 200"
 else
   echo "  [FAIL] healthz returned $code"
+  echo "  --- container said ---"
+  "${COMPOSE[@]}" logs --tail=40 2>&1 | sed 's/^/  /'
   fail=1
 fi
 
