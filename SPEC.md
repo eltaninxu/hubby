@@ -87,17 +87,9 @@ settings 去掉 monthly_cap_usd,加 recipient_email TEXT
   7. 打 "lunch $15" → `Pot has $14.00, you asked for $15.00.` 硬顶
   8. 切账本页;切沙箱 personal 号的 Activity 页,$6.00 from Hubby 在那儿
 
-### v2.6 验收(替换 v1 §9 的 2–7;1、8、9 不变)
+### v2.6 验收
 
-2. 空 pot 发 "fried chicken drumstick $6" → `decline`,理由是 `Pot has $0.00, you asked for $6.00. Fund it first.` 原文,账本里 **没有** LLM 的话,也没有建任何 PayPal 单。
-3. Fund the pot 20 → PayPal 按钮 → 买家沙箱号付款 → 回到 `/`,flash 含 `Pot funded +$20.00` 和 capture id;账本 deposit 行 `paid`;Pot 显示 $20.00(减去 seed 影响后)。
-4. 再发 "fried chicken drumstick $6" → `approve` → 响应里 `status=released`、`payout_item_id` 非空;账本一条 request `approved` + 一条 release `released`;Pot 变 $14.00;**沙箱 personal 号登进去 Activity 里有一笔 $6.00 收入**,备注是 item 名。
-5. 发 "bubble tea $4.50" → `decline`,理由引 3 天规矩和上一杯日期(同 v1)。
-6. 发 "a cake" → `ask`,不建单不打款。
-7. 发 "lunch $15"(pot 14)→ `decline`,`Pot has $14.00, you asked for $15.00. Fund it first.`,不经 LLM。
-7b. Fund the pot 走到 PayPal 页点取消 → deposit 行 `cancelled`,Pot 不变。
-7c. 把 `HUBBY_RECIPIENT_EMAIL` 改成一个不存在的邮箱(如 `nobody-<随机>@example.com`)再 approve 一笔 → release 行 `unclaimed` 或 `pending`,不是 `released`,Pot 仍按已扣算;改回去。
-10. 同一条 approve 不会双发:人为让轮询超时(把轮询次数改 0 跑一次),账本 `pending`;重启服务,**没有**第二笔 payout 出现在 personal 号里。
+已并进第 9 节(2026-11-09),以第 9 节为准。
 
 ### v2.7 日程(替换 v1 §8)
 
@@ -263,17 +255,30 @@ Anything over $20 in one go needs a one-line reason in the request.
 - **11/11(Day 4)**:修 bug、把第 9 节 1–7 全过一遍录屏证据(截图或 asciinema 都行)发群里;**当晚代码冻结**,之后只改 README 错字。
 - 11/12:Eltanin 录视频、写 Devpost;跑腿待命修阻塞性 bug。
 
-## 9. 验收(Eltanin 亲自过,每条要能复现)
+## 9. 验收(v2 现行;2026-11-09 按 README 与 `app/` 现有代码重写,Eltanin 亲自过,每条要能复现)
 
-1. 干净机器 `git clone` → 填 `.env`(按 `.env.example`)→ `docker compose up` → 浏览器 `localhost:8080` 出聊天页,`/healthz` 返回 ok。
-2. 发 "bubble tea $4.50" → 返回 `decline`,理由里出现上一杯的日期和"3 days"。账本多一行 declined。
-3. 发 "fried chicken drumstick $6" → `approve`,出现 PayPal 按钮;点开,用买家沙箱号登录付款;回到 `/`,flash 显示 Paid 和 capture id;账本该行 `paid`,`paypal_capture_id` 非空;PayPal 沙箱卖家后台能看到这笔。
-4. 发 "a cake" → `ask`,理由是问价格,不建单。
-5. 把月预算改成 `7`,再发 "lunch $8" → `decline`,理由是 `Hard cap: $11.70 of $7 used this month` 这个格式(种子两行 $5.70 + 验收 3 那笔炸鸡 $6.00),**账本理由里没有 LLM 的话**。
-6. 发 "dessert $5" 在同一天已有 paid 的 sweets 之后 → `decline`,理由引用 "One sweet thing per day"。
-7. 买家在 PayPal 页点取消 → 回到 `/paypal/cancel` → 账本该行 `cancelled`,本月已付不变。
-8. README 从头读一遍,一个评委没见过我们家也能照着跑到第 3 条。
-9. 密钥扫描零命中:字母 s、k 加连字符的前缀、`EL` 开头 60 位以上的串、PayPal 的 `BAA` 开头(后接 `2`)的客户端 id,三样都不许出现在仓库里;`.env` 在 `.gitignore`;`.env.example` 里只有变量名和说明。
+> 这一节替换了 v1 的第 9 节和上面 v2.6;v1 原表在 git 历史 `8f6adc3` 里。
+> 前提:沙箱 REST app 已开 Payouts;首次启动 pot = **$0.00**(两行 seed release $4.50 + $1.20,和一行 seed deposit $5.70 相抵)。
+> 「离线」栏 = `pytest` 里守着这条的测试(假模型 + 假 PayPal);空着 = 只能在沙箱里手过。「README」栏 = README *What to try* 的第几步。
+
+| # | 做什么 | 应该看到 | README | 离线 |
+|---|---|---|---|---|
+| 1 | 干净机器 `git clone` → `cp .env.example .env` 填好 → `docker compose up --build` | `localhost:8080` 出聊天页,右栏 `Pot $0.00`;`/healthz` 返回 `"ok": true`、`"paypal": "sandbox"`。少填一个必填变量 → 拒绝启动,报出缺的变量名 | Quick start | `test_healthz` `test_pages_render` `test_seed_pot_is_zero` |
+| 2 | 空 pot 发 `fried chicken drumstick $6` | `decline`,理由原文 `Pot has $0.00, you asked for $6.00. Fund it first.`;账本多一行 request `declined`,理由里**没有 LLM 的话**;模型的 decide 没被调用,没有建单、没有 payout | 1 | `test_empty_pot_declines_without_the_model` |
+| 3 | Fund the pot `20` → PayPal 按钮 → 买家沙箱号付款 | 回到 `/`,flash `Pot funded +$20.00 · capture …`;账本 deposit 行 `paid`、`paypal_capture_id` 非空;Pot `$20.00` | 2 | `test_funding_the_pot_via_paypal` |
+| 4 | 再发 `fried chicken drumstick $6` | 先出一行 `Releasing via PayPal…`,然后 `approve` → `Released $6.00 to you · payout …`;响应 `status=released`、`payout_item_id` 非空;账本一条 request `approved` + 一条 release `released`;Pot `$14.00`;**personal 号 Activity 里有 +$6.00**,备注是 item 名 | 3 | `test_approve_releases_money_and_drops_the_pot` |
+| 5 | 发 `bubble tea $4.50` | `decline`,理由引「3 天一杯」的规矩和昨天那杯(seed);**拒了不动账**:没有 release 行,Pot 仍 `$14.00` | 4 | 动账那半:`test_model_decline_is_logged` |
+| 6 | 发 `a cake` | `ask`,`How much is it?`;不建单、不打款,Pot 不变。紧接着只回 `$5`,会和上一句拼成 `a cake $5` 继续判 | 5 | `test_missing_amount_asks_and_never_pays` `test_price_followup_completes_the_question` |
+| 7 | 发 `dessert $5`(今天已有 seed 的 Pepsi) | `decline`,理由引 `One sweet thing per day`;Pot 不变 | — | `test_model_decline_is_logged` |
+| 8 | 发 `lunch $15`(Pot 14) | `decline`,`Pot has $14.00, you asked for $15.00. Fund it first.`,不经 LLM。金额正好等于余额时放行(余额 6 问 6 → approve,Pot 归 0) | 6 | `test_pot_too_small_declines_with_exact_copy` `test_exact_pot_balance_is_allowed` |
+| 9 | Fund the pot,到 PayPal 页点取消 | 回到 `/paypal/cancel`,deposit 行 `cancelled`,Pot 不变 | 7 | `test_cancel_funding_leaves_pot_alone` |
+| 10 | 打开 `/ledger` | 顶部 Pot 余额;deposit、release、declined 三种行在同一张表里,有 Kind 列,release 金额前带 `−`、deposit 带 `+` | 8 | `test_pages_render` |
+| 11 | payout 的三种非成功结果 | `failed`:release 行 `failed`,理由带 PayPal 的错误,**Pot 不扣**;`pending` / `unclaimed`:Pot **照扣**(钱已离开发款账户)。手过 unclaimed:在本机 `/settings` 把收款邮箱改成 `nobody-<随机>@example.com` → approve 一笔 → release `unclaimed` 或 `pending`,Pot 已扣;改回去 | — | `test_failed_payout_does_not_eat_the_pot` `test_pending_payout_still_counts_against_the_pot` `test_unclaimed_payout_is_recorded` `test_unclaimed_counts_as_spent_but_failed_does_not` |
+| 12 | 同一笔 approve 不会双发:`PAYOUT_POLL_ATTEMPTS=1`、`PAYOUT_POLL_INTERVAL=0` 起服务,approve 一笔 | release 行 `pending`;重启服务后 personal 号里**没有**第二笔 payout,账本仍只有一条 release。(代码把轮询次数夹到至少 1,所以写 0 也是 1;沙箱约 17 秒才 SUCCESS,一次立刻轮询必然 pending) | — | |
+| 13 | 公网访客改 `/settings` | 规矩和收款邮箱都不变,flash `Settings are read-only on the public demo.`;本机 / 私网能改;`HUBBY_SETTINGS_OPEN=1` 时谁都能改。邮箱不像邮箱、规矩为空 → 不存 | — | `test_public_clients_cannot_edit_settings` `test_settings_validation` |
+| 14 | 公网 demo 一天超过 `HUBBY_DAILY_REQUESTS` 次请求 | `/api/request` 回 429 `The public demo used its daily request budget. Try again tomorrow.`;`0` = 不限 | — | `test_daily_budget_caps_the_day` |
+| 15 | README 从头读一遍 | 一个没见过我们家的评委照着能跑到第 4 条(approve 后钱到 personal 号) | — | |
+| 16 | 密钥扫描 | 零命中:字母 s、k 加连字符的前缀、`EL` 开头 60 位以上的串、PayPal 的 `BAA` 开头(后接 `2`)的客户端 id,三样都不许出现在仓库里;`.env` 在 `.gitignore`;`.env.example` 里只有变量名、说明和不含秘密的默认值(`sandbox`、`http://localhost:8080`、`8080`) | — | |
 
 ## 10. 环境变量(`.env.example` 原样抄)
 
