@@ -2,10 +2,11 @@
 
 Balance is derived from the ledger, never stored:
 
-    sum(deposit paid) - sum(release released or pending)
+    sum(deposit paid) - sum(release released, pending or unclaimed)
 
-An approved payout that is still pending already counts as gone: the money left
-the pot the moment Hubby asked PayPal to send it. A failed one does not.
+An approved payout that is still pending or unclaimed already counts as gone:
+the money left the pot the moment Hubby asked PayPal to send it. A failed one
+does not.
 """
 
 from __future__ import annotations
