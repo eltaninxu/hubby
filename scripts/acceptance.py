@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Acceptance run for SPEC v2 section 9, with a real browser and PayPal sandbox.
+"""Acceptance run for SPEC section 9 (items 1-16), with a real browser and PayPal sandbox.
 
-    HUBBY_BASE=https://hubby.royola.dev \
+    HUBBY_BASE=https://hubby.royola.dev HUBBY_LOCAL_BASE=http://127.0.0.1:8085 \
     PAYPAL_SANDBOX_PERSONAL_EMAIL=... PAYPAL_SANDBOX_PERSONAL_PASSWORD=... \
     HUBBY_ACCEPT_DB=data/hubby.db \
     .venv/bin/python scripts/acceptance.py
@@ -9,10 +9,15 @@
 The demo database must be fresh (pot $0.00). Writes screenshots and report.md
 into evidence/acceptance-v2/.
 
+Check names carry the SPEC section 9 item numbers. HUBBY_LOCAL_BASE is the same
+service on the host: /settings is read-only from the public address, so item 11
+changes the recipient through it.
+
 Not automated here, and stated in the report:
   * item 1's clean `git clone` + `compose up` (see scripts/clone_check.sh)
-  * item 8's human read-through of the README
-  * item 10's restart-idempotency (needs a restart mid-run)
+  * item 7 (dessert), 13 (read-only settings), 14 (daily cap): pytest covers them
+  * item 12's restart half (needs a restart mid-run)
+  * item 15's human read-through of the README
   * the personal account's Activity page (manual glance)
 """
 
@@ -32,6 +37,7 @@ import httpx
 from playwright.async_api import Page, async_playwright
 
 BASE = os.environ.get("HUBBY_BASE", "http://localhost:8080").rstrip("/")
+LOCAL_BASE = os.environ.get("HUBBY_LOCAL_BASE", "http://127.0.0.1:8085").rstrip("/")
 DB_PATH = pathlib.Path(os.environ.get("HUBBY_ACCEPT_DB", "data/hubby.db"))
 OUT = pathlib.Path("evidence/acceptance-v2")
 
@@ -64,10 +70,21 @@ def pot() -> float:
     with db_conn() as conn:
         row = conn.execute(
             "SELECT COALESCE(SUM(CASE WHEN kind='deposit' AND status='paid' THEN amount_usd END),0)"
-            " - COALESCE(SUM(CASE WHEN kind='release' AND status IN ('released','pending')"
+            " - COALESCE(SUM(CASE WHEN kind='release' AND status IN ('released','pending','unclaimed')"
             " THEN amount_usd END),0) AS b FROM ledger"
         ).fetchone()
     return round(float(row["b"]), 2)
+
+
+def recipient() -> str | None:
+    with db_conn() as conn:
+        row = conn.execute("SELECT recipient_email FROM settings WHERE id=1").fetchone()
+    return row["recipient_email"] if row else None
+
+
+async def set_recipient(rules: str, email: str) -> None:
+    async with httpx.AsyncClient(base_url=LOCAL_BASE, timeout=30) as http:
+        await http.post("/settings", data={"rules": rules, "recipient_email": email})
 
 
 def seed_day(name: str) -> str | None:
@@ -165,7 +182,7 @@ async def main() -> int:
         home = await http.get("/")
         start_pot = (await http.get("/api/pot")).json()["pot"]
         check(
-            "0. fresh demo database (pot is empty)",
+            "pre. fresh demo database (pot is empty)",
             start_pot == 0.0,
             f"pot={start_pot}",
         )
@@ -267,80 +284,81 @@ async def main() -> int:
             )
             await shot(page, "06-cake-ask")
 
-            # 7. the pot is the hard limit
+            # 8. the pot is the hard limit
             await say(page, "lunch $15")
             row = rows("WHERE kind='request' ORDER BY id DESC LIMIT 1")[0]
             check(
-                "7. over-pot request declines with the fixed text",
+                "8. over-pot request declines with the fixed text",
                 row["decision"] == "decline"
                 and row["reason"] == "Pot has $14.00, you asked for $15.00. Fund it first.",
                 row["reason"],
             )
-            await shot(page, "07-pot-limit")
+            await shot(page, "08-pot-limit")
 
-            # 7b. cancelling a funding leaves the pot alone
+            # 9. cancelling a funding leaves the pot alone
             try:
                 before = pot()
                 flash = await fund_pot(page, context, 5, cancel=True)
                 deposit = rows("WHERE kind='deposit' ORDER BY id DESC LIMIT 1")[0]
                 check(
-                    "7b. cancelled funding: deposit cancelled, pot unchanged",
+                    "9. cancelled funding: deposit cancelled, pot unchanged",
                     deposit["status"] == "cancelled" and pot() == before and "cancelled" in flash.lower(),
                     f"{flash[:50]} · pot={pot():.2f}",
                 )
-                await shot(page, "07b-cancel-funding")
+                await shot(page, "09-cancel-funding")
             except Exception as exc:  # noqa: BLE001
-                check("7b. cancelled funding", False, str(exc)[:200])
+                check("9. cancelled funding", False, str(exc)[:200])
 
-            # 7c. a payout to an email with no PayPal account is not "released"
+            # 11. a payout to an email with no PayPal account is unclaimed, and still
+            # leaves the pot. The recipient is changed through the host address and
+            # checked before any money moves: through the public address the change
+            # is silently refused and the payout goes to the real account.
+            original = recipient()
+            with db_conn() as conn:
+                row = conn.execute("SELECT rules FROM settings WHERE id=1").fetchone()
+            rules = row["rules"] if row else ""
             try:
-                settings = {}
-                async with httpx.AsyncClient(base_url=BASE, timeout=30) as http:
-                    rules = ""
-                    with db_conn() as conn:
-                        row = conn.execute("SELECT rules FROM settings WHERE id=1").fetchone()
-                        rules = row["rules"] if row else ""
-                    bogus = f"nobody-{int(time.time())}@example.com"
-                    await http.post(
-                        "/settings", data={"rules": rules, "recipient_email": bogus}
+                bogus = f"nobody-{int(time.time())}@example.com"
+                await set_recipient(rules, bogus)
+                if recipient() != bogus:
+                    check("11. recipient switched to a dead email", False,
+                          f"still {recipient()} (is {LOCAL_BASE} the host address?)")
+                else:
+                    before = pot()
+                    await say(page, "gum $1", timeout=180_000)
+                    release = rows("WHERE kind='release' ORDER BY id DESC LIMIT 1")[0]
+                    # Final once the reply is in: the app never re-polls a pending payout.
+                    check(
+                        "11. payout to a dead email is unclaimed and still leaves the pot",
+                        release["status"] == "unclaimed"
+                        and pot() == round(before - release["amount_usd"], 2),
+                        f"{release['status']} · pot {before:.2f} -> {pot():.2f}",
                     )
-                reply = await say(page, "gum $1", timeout=180_000)
-                release = rows("WHERE kind='release' ORDER BY id DESC LIMIT 1")[0]
-                check(
-                    "7c. payout to a dead email is unclaimed or pending, never released",
-                    release["status"] in {"unclaimed", "pending"},
-                    release["status"],
-                )
-                # put the real recipient back
-                async with httpx.AsyncClient(base_url=BASE, timeout=30) as http:
-                    await http.post(
-                        "/settings",
-                        data={
-                            "rules": rules,
-                            "recipient_email": os.environ["PAYPAL_SANDBOX_PERSONAL_EMAIL"],
-                        },
-                    )
-                await shot(page, "07c-unclaimed")
+                    await shot(page, "11-unclaimed")
             except Exception as exc:  # noqa: BLE001
-                check("7c. payout to a dead email", False, str(exc)[:200])
+                check("11. payout to a dead email", False, str(exc)[:200])
+            finally:
+                if original:
+                    await set_recipient(rules, original)
+                check("11. recipient restored", recipient() == original, f"{recipient()}")
 
-            # 10. one release row per approved request, no double payouts
+            # 12. one release row per approved request, no double payouts
             with db_conn() as conn:
                 dupes = conn.execute(
                     "SELECT request_id, COUNT(*) n FROM ledger WHERE kind='release'"
                     " AND request_id IS NOT NULL GROUP BY request_id HAVING n > 1"
                 ).fetchall()
             check(
-                "10. every approved request has at most one release row",
+                "12. every approved request has at most one release row",
                 not dupes,
                 f"duplicates={[dict(d) for d in dupes]}",
             )
 
         await page.goto(BASE + "/ledger", wait_until="networkidle")
-        await shot(page, "08-ledger")
+        await shot(page, "10-ledger")
         await browser.close()
 
-    # 9. no secrets in the working tree or anywhere in git history
+    # 16. no secrets in the working tree or anywhere in git history
     tree_hits: list[str] = []
     tracked = subprocess.run(
         ["git", "ls-files", "-z"], capture_output=True, text=True, timeout=60
@@ -368,7 +386,7 @@ async def main() -> int:
         history_hits.append("(could not read git history)")
 
     check(
-        "9. no key material in the repo (tree + history)",
+        "16. no key material in the repo (tree + history)",
         not tree_hits and not history_hits,
         f"tree={tree_hits} history={history_hits}" if (tree_hits or history_hits) else "clean",
     )
@@ -391,10 +409,11 @@ async def main() -> int:
         "",
         "Not automated here:",
         "- **item 1 (clean clone + compose up)** — `scripts/clone_check.sh`,",
-        "- **item 8 (README walk-through by a human)** — still needs a person who has",
-        "  never seen this project,",
-        "- **item 10 restart half** — no payout is re-sent after a restart because nothing",
+        "- **items 7, 13, 14 (dessert rule, read-only settings, daily cap)** — covered by pytest,",
+        "- **item 12 restart half** — no payout is re-sent after a restart because nothing",
         "  re-sends payouts at all; the duplicate-row check above is the automated half,",
+        "- **item 15 (README walk-through by a human)** — still needs a person who has",
+        "  never seen this project,",
         "- **personal account Activity page** — the payout transaction ids are the evidence;",
         "  a glance at the sandbox buyer's Activity is manual.",
     ]
