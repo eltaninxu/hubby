@@ -158,27 +158,58 @@ form.addEventListener("submit", (event) => {
 
 // -- funding the pot -------------------------------------------------------
 let pollTimer = null;
+const PAYPAL_BACK = "hubby-paypal-back";
 
-function pollPot(startValue) {
+function stopPolling() {
   clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+// Show the pot as the server has it. Never while a request is in flight: its
+// release row moves the pot mid-answer, and the verdict sets the number itself.
+// Returns whether the number changed.
+async function refreshPot() {
+  if (!potValue || input.disabled) return false;
+  const response = await fetch("/api/pot");
+  const data = await response.json();
+  if (input.disabled) return false;
+  const changed = Number(data.pot).toFixed(2) !== potValue.dataset.pot;
+  setPot(data.pot);
+  return changed;
+}
+
+function pollPot() {
+  stopPolling();
   let ticks = 0;
   pollTimer = setInterval(async () => {
     ticks += 1;
+    if (ticks > 80) stopPolling();
     try {
-      const response = await fetch("/api/pot");
-      const data = await response.json();
-      if (Number(data.pot).toFixed(2) !== Number(startValue).toFixed(2)) {
-        clearInterval(pollTimer);
-        window.location.reload();
-        return;
-      }
-      setPot(data.pot);
+      if (await refreshPot()) stopPolling();
     } catch (err) {
       /* keep polling; the next tick may work */
     }
-    if (ticks > 80) clearInterval(pollTimer);
   }, 3000);
 }
+
+// The PayPal window comes back to "/?flash=…", paid or cancelled. It tells the
+// page that opened it, which settles the pot once and stops polling.
+if (new URLSearchParams(window.location.search).has("flash")) {
+  try {
+    localStorage.setItem(PAYPAL_BACK, String(Date.now()));
+  } catch (err) {
+    /* no storage: the poll still settles a paid funding */
+  }
+}
+window.addEventListener("storage", async (event) => {
+  if (event.key !== PAYPAL_BACK || !pollTimer) return;
+  stopPolling();
+  try {
+    await refreshPot();
+  } catch (err) {
+    /* the number stays as it was */
+  }
+});
 
 if (fundForm) {
   fundForm.addEventListener("submit", async (event) => {
@@ -202,7 +233,7 @@ if (fundForm) {
       }
       window.open(data.approve_url, "_blank", "noopener");
       addNote("PayPal window opened. Finish the payment, and the pot updates by itself.");
-      pollPot(potValue ? potValue.dataset.pot : data.pot);
+      pollPot();
     } catch (err) {
       addError("Could not start funding: " + err.message);
     } finally {
