@@ -102,7 +102,13 @@ async def shot(page: Page, name: str) -> None:
 
 async def say(page: Page, text: str, timeout: int = 120_000) -> str:
     await page.fill("#text", text)
-    await page.press("#text", "Enter")
+    # Wait for the server's answer, not just for the input to come back: a page
+    # reload mid-request also re-enables the input, and the ledger row read next
+    # would still say "pending". A reload now fails here loudly instead.
+    async with page.expect_response(
+        lambda r: r.url.endswith("/api/request"), timeout=timeout
+    ):
+        await page.press("#text", "Enter")
     await page.wait_for_function(
         "() => !document.getElementById('text').disabled", timeout=timeout
     )
@@ -308,6 +314,9 @@ async def main() -> int:
                 await shot(page, "09-cancel-funding")
             except Exception as exc:  # noqa: BLE001
                 check("9. cancelled funding", False, str(exc)[:200])
+            # A cancelled funding leaves the page polling the pot for minutes; a
+            # fresh page stops that before item 11 moves the pot.
+            await page.goto(BASE + "/", wait_until="networkidle")
 
             # 11. a payout to an email with no PayPal account is unclaimed, and still
             # leaves the pot. The recipient is changed through the host address and
