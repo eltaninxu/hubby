@@ -153,12 +153,12 @@ async def fund_pot(page: Page, context, amount: float, *, cancel: bool = False) 
     await login_if_needed(popup)
 
     if cancel:
-        for text in ("取消并返回Test Store", "Cancel and return to Test Store"):
-            try:
-                await popup.get_by_text(text, exact=False).first.click(timeout=4_000)
-                break
-            except Exception:
-                continue
+        # The link ends with the merchant's trading name ("...返回Hubby" now,
+        # "...Test Store" before the sandbox business was renamed), so match the
+        # fixed part only. No click -> raise here, not 90 s later in wait_for_url.
+        await popup.get_by_text(
+            re.compile(r"取消并返回|Cancel and return to", re.I)
+        ).first.click(timeout=8_000)
     else:
         for selector in (
             "#payment-submit-btn",
