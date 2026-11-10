@@ -212,7 +212,10 @@ async def run(dry: bool) -> int:
 
     state = {"caption": ""}
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # System Chrome by default, like acceptance.py; set HUBBY_CHROME_CHANNEL=""
+        # to use Playwright's bundled Chromium instead.
+        channel = os.environ.get("HUBBY_CHROME_CHANNEL", "chrome") or None
+        browser = await p.chromium.launch(channel=channel, headless=True)
         context = await browser.new_context(
             viewport=VIEW,
             record_video_dir=str(OUT / "raw"),
