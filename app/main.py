@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.budget import money, pot_covers, pot_refusal_reason
+from app.budget import money, pot_covers, pot_refusal_reason, stated_amount
 from app.config import ConfigError, get_settings
 from app.db import Database, today_iso
 from app.llm import LLMError, HubbyBrain
@@ -412,7 +412,32 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
     db: Database = state.db
     brain: HubbyBrain = state.brain
 
-    # 1. facts out of the sentence
+    # 0. a plain "$N" the pot can't cover is declined in code, no model call
+    #    (this shortcut only ever declines; everything else falls through)
+    stated = stated_amount(text)
+    if stated is not None and stated > 0:
+        covered, balance = pot_covers(db, stated)
+        if not covered:
+            reason = pot_refusal_reason(balance, stated)
+            db.add_entry(
+                kind="request",
+                raw_text=text,
+                amount_usd=stated,
+                category="other",
+                decision="decline",
+                reason=reason,
+                status="declined",
+            )
+            return {
+                "decision": "decline",
+                "reason": reason,
+                "amount": stated,
+                "item": text.strip(),
+                "category": "other",
+                "status": "declined",
+            }
+
+    # 1. facts out of the sentence (first model call)
     parsed = await brain.extract(text)
     amount = parsed.get("amount_usd")
     item = parsed.get("item") or text
@@ -439,7 +464,8 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "status": "ask",
         }
 
-    # 3. the pot is the hard limit, in code, before the model gets a say
+    # 3. the pot is the hard limit, in code, before the model decides
+    #    (still guards the amount the model read when step 0 didn't apply)
     covered, balance = pot_covers(db, float(amount))
     if not covered:
         reason = pot_refusal_reason(balance, float(amount))
@@ -461,7 +487,7 @@ async def _handle_purchase(state: Any, text: str) -> dict[str, Any]:
             "status": "declined",
         }
 
-    # 4. the model argues
+    # 4. the model argues (second model call)
     settings_row = db.get_settings()
     verdict = await brain.decide(
         rules=settings_row.get("rules", ""),

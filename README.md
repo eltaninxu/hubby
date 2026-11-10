@@ -8,10 +8,12 @@ ledger, gives a verdict with a reason that quotes the actual rule or the actual
 ledger line — and only when it says yes does PayPal move that exact amount back
 into your hands.
 
-The part that matters: **the model argues, the code enforces.** The pot balance
-is checked in Python before the model is ever consulted, so a "yes" from the
-model cannot spend money that is not there. And the money itself never leaves
-PayPal until Hubby approves.
+The part that matters: **the model argues, the code enforces.** The pot is the
+hard limit and it lives in Python: a plainly stated price the pot can't cover
+is declined before any model call, and every other amount is checked against
+the pot before the model is asked for a verdict. A "yes" from the model cannot
+spend money that is not there. And the money itself never leaves PayPal until
+Hubby approves.
 
 Built for the PayPal AI Hackathon. PayPal sandbox only.
 
@@ -66,11 +68,15 @@ So: not a wallet *for* agents. A wallet an agent *keeps for you*.
 1. **Fund the pot.** A real PayPal order: the buyer approves, Hubby captures,
    and a `deposit` row lands in the ledger. That money now sits in Hubby's
    PayPal account.
-2. **Ask.** Every purchase request goes through three gates in order:
+2. **Ask.** First a shortcut in plain Python: if the sentence ends with one
+   plain dollar amount (`lunch $15`) and the pot can't cover it, Hubby declines
+   on the spot with a fixed message. No model call at all. This shortcut can
+   only decline. Everything else goes through three gates in order:
    - *extract* — the model pulls `amount`, `item`, `category` out of the
      sentence. No price → Hubby asks "How much is it?" and stops.
-   - *pot check* — plain Python: is there enough in the pot? If not, decline
-     with a fixed message. The model is not called.
+   - *pot check* — plain Python again, on the amount the model read: is there
+     enough in the pot? If not, decline with the same fixed message. The model
+     is not asked for a verdict.
    - *decide* — the model reads the rules, the pot balance and the last 30 days
      of ledger, and returns `approve | decline | ask` plus a reason that has to
      point at a rule or a ledger line.

@@ -1,4 +1,6 @@
-from app.budget import money, pot_refusal_reason
+import pytest
+
+from app.budget import money, pot_refusal_reason, stated_amount
 from app.db import Database
 
 
@@ -11,6 +13,48 @@ def test_money_format():
 def test_pot_refusal_reason_is_fixed_text():
     assert pot_refusal_reason(0, 6) == "Pot has $0.00, you asked for $6.00. Fund it first."
     assert pot_refusal_reason(14, 15) == "Pot has $14.00, you asked for $15.00. Fund it first."
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("fried chicken drumstick $6", 6.0),
+        ("bubble tea $4.50", 4.5),
+        ("$5", 5.0),
+        ("lunch $ 15", 15.0),
+        ("rent $1,200", 1200.0),
+        ("bubble tea $4.", 4.0),
+        ("lunch $15!  ", 15.0),
+    ],
+)
+def test_stated_amount_reads_one_plain_dollar_amount(text, expected):
+    assert stated_amount(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "$5k",  # a letter glued to the number
+        "$6.999",  # more than two decimals
+        "$1,20",  # not a thousands separator
+        "2 teas at $4 each",  # another digit elsewhere
+        "was $20 now $6",  # two amounts
+        "coffee with my $5 off coupon",  # the number is not the price
+        "bubble tea $4, please",  # words after the number
+        "$5 lunch",
+        "$5 million yacht",
+        "$$5",
+        "$.50",
+        "5$",  # no number after the sign
+        "$",
+        "six dollars",
+        "a cake",
+        "",
+        "$" + "9" * 400,  # overflows to inf
+    ],
+)
+def test_stated_amount_is_none_unless_unambiguous(text):
+    assert stated_amount(text) is None
 
 
 def test_unclaimed_counts_as_spent_but_failed_does_not(tmp_path):

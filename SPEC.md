@@ -27,7 +27,7 @@ v1 已经做完并上线(https://hubby.royola.dev,commit `bde7a46`),验收 10/10
 **改:**
 
 1. `approve` 的动作:v1 是"建单返回 approve_url";v2 是"调 Payouts 给 `recipient_email` 打 `amount_usd`",同步等结果(见 v2.3),账本写 `release`。
-2. 硬顶:v1 是"本月 paid 合计 + 本次 > 月预算";v2 是 **`pot_balance < amount_usd`** → `decline`,理由固定格式 `Pot has $X.XX, you asked for $Y.YY. Fund it first.`,不经 LLM。`pot_balance` 按账本算:`sum(deposit 且 status=paid)` − `sum(release 且 status ∈ {released, pending})`。
+2. 硬顶:v1 是"本月 paid 合计 + 本次 > 月预算";v2 是 **`pot_balance < amount_usd`** → `decline`,理由固定格式 `Pot has $X.XX, you asked for $Y.YY. Fund it first.`,裁决不经 LLM。**捷径(2026-11-10 加)**:句子以唯一一个明写的 `$N` 结尾、别处没有别的数字、且 Pot 盖不住时,代码在抽金额之前就拒,整句一次 LLM 都不调(`stated_amount`,只会拒,不会批);其余情况先由 LLM 抽金额,再由代码查 Pot。`pot_balance` 按账本算:`sum(deposit 且 status=paid)` − `sum(release 且 status ∈ {released, pending})`。
 3. v1 的 Orders 流程**保留**,改名 **Fund the pot**:首页一个输入框 + 按钮(金额,默认 20),走原来的 create → approve_url → return/capture → 账本写 `deposit`,status `paid`;cancel → `cancelled`。
 4. `MONTHLY_CAP_USD` 去掉(env、settings 页、种子、README 全删)。预算就是 pot 里有多少钱。
 5. 新增 env `HUBBY_RECIPIENT_EMAIL`:release 打给谁。demo 和 `.env.example` 用沙箱 personal 号(钥匙文件里 `PAYPAL_SANDBOX_PERSONAL_EMAIL`)。settings 页可改。
@@ -264,13 +264,13 @@ Anything over $20 in one go needs a one-line reason in the request.
 | # | 做什么 | 应该看到 | README | 离线 |
 |---|---|---|---|---|
 | 1 | 干净机器 `git clone` → `cp .env.example .env` 填好 → `docker compose up --build` | `localhost:8080` 出聊天页,右栏 `Pot $0.00`;`/healthz` 返回 `"ok": true`、`"paypal": "sandbox"`。少填一个必填变量 → 拒绝启动,报出缺的变量名 | Quick start | `test_healthz` `test_pages_render` `test_seed_pot_is_zero` |
-| 2 | 空 pot 发 `fried chicken drumstick $6` | `decline`,理由原文 `Pot has $0.00, you asked for $6.00. Fund it first.`;账本多一行 request `declined`,理由里**没有 LLM 的话**;模型的 decide 没被调用,没有建单、没有 payout | 1 | `test_empty_pot_declines_without_the_model` |
+| 2 | 空 pot 发 `fried chicken drumstick $6` | `decline`,理由原文 `Pot has $0.00, you asked for $6.00. Fund it first.`;账本多一行 request `declined`,理由里**没有 LLM 的话**;模型一次都没被调用(extract 和 decide 都没有),没有建单、没有 payout | 1 | `test_stated_price_the_empty_pot_cannot_cover_never_reaches_the_model` `test_empty_pot_declines_without_the_model` |
 | 3 | Fund the pot `20` → PayPal 按钮 → 买家沙箱号付款 | 回到 `/`,flash `Pot funded +$20.00 · capture …`;账本 deposit 行 `paid`、`paypal_capture_id` 非空;Pot `$20.00` | 2 | `test_funding_the_pot_via_paypal` |
 | 4 | 再发 `fried chicken drumstick $6` | 先出一行 `Releasing via PayPal…`,然后 `approve` → `Released $6.00 to you · payout …`;响应 `status=released`、`payout_item_id` 非空;账本一条 request `approved` + 一条 release `released`;Pot `$14.00`;**personal 号 Activity 里有 +$6.00**,备注是 item 名 | 3 | `test_approve_releases_money_and_drops_the_pot` |
 | 5 | 发 `bubble tea $4.50` | `decline`,理由引「3 天一杯」的规矩和昨天那杯(seed);**拒了不动账**:没有 release 行,Pot 仍 `$14.00` | 4 | 动账那半:`test_model_decline_is_logged` |
 | 6 | 发 `a cake` | `ask`,`How much is it?`;不建单、不打款,Pot 不变。紧接着只回 `$5`,会和上一句拼成 `a cake $5` 继续判 | 5 | `test_missing_amount_asks_and_never_pays` `test_price_followup_completes_the_question` |
 | 7 | 发 `dessert $5`(今天已有 seed 的 Pepsi) | `decline`,理由引 `One sweet thing per day`;Pot 不变 | — | `test_model_decline_is_logged` |
-| 8 | 发 `lunch $15`(Pot 14) | `decline`,`Pot has $14.00, you asked for $15.00. Fund it first.`,不经 LLM。金额正好等于余额时放行(余额 6 问 6 → approve,Pot 归 0) | 6 | `test_pot_too_small_declines_with_exact_copy` `test_exact_pot_balance_is_allowed` |
+| 8 | 发 `lunch $15`(Pot 14) | `decline`,`Pot has $14.00, you asked for $15.00. Fund it first.`,一次 LLM 都不调。金额正好等于余额时放行(余额 6 问 6 → approve,Pot 归 0) | 6 | `test_stated_price_above_a_funded_pot_never_reaches_the_model` `test_pot_too_small_declines_with_exact_copy` `test_exact_pot_balance_is_allowed` |
 | 9 | Fund the pot,到 PayPal 页点取消 | 回到 `/paypal/cancel`,deposit 行 `cancelled`,Pot 不变 | 7 | `test_cancel_funding_leaves_pot_alone` |
 | 10 | 打开 `/ledger` | 顶部 Pot 余额;deposit、release、declined 三种行在同一张表里,有 Kind 列,release 金额前带 `−`、deposit 带 `+` | 8 | `test_pages_render` |
 | 11 | payout 的三种非成功结果 | `failed`:release 行 `failed`,理由带 PayPal 的错误,**Pot 不扣**;`pending` / `unclaimed`:Pot **照扣**(钱已离开发款账户)。手过 unclaimed:在本机 `/settings` 把收款邮箱改成 `nobody-<随机>@example.com` → approve 一笔 → release `unclaimed` 或 `pending`,Pot 已扣;改回去 | — | `test_failed_payout_does_not_eat_the_pot` `test_pending_payout_still_counts_against_the_pot` `test_unclaimed_payout_is_recorded` `test_unclaimed_counts_as_spent_but_failed_does_not` |

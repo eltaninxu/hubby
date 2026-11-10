@@ -50,6 +50,77 @@ def test_empty_pot_declines_without_the_model(client, brain, db, paypal):
     assert paypal.orders == []
 
 
+def test_stated_price_the_empty_pot_cannot_cover_never_reaches_the_model(
+    client, brain, db, paypal
+):
+    result = ask(client, "fried chicken drumstick $6")
+
+    assert result["decision"] == "decline"
+    assert result["reason"] == "Pot has $0.00, you asked for $6.00. Fund it first."
+    assert result["amount"] == 6.0
+    assert result["item"] == "fried chicken drumstick $6"
+    assert result["category"] == "other"
+    assert result["status"] == "declined"
+    assert brain.extract_calls == 0
+    assert brain.decide_calls == 0
+    assert paypal.payouts == []
+    latest = db.all_entries()[0]
+    assert latest["kind"] == "request"
+    assert latest["raw_text"] == "fried chicken drumstick $6"
+    assert latest["amount_usd"] == 6.0
+    assert latest["category"] == "other"
+    assert latest["decision"] == "decline"
+    assert latest["status"] == "declined"
+    assert latest["reason"] == "Pot has $0.00, you asked for $6.00. Fund it first."
+
+
+def test_stated_price_above_a_funded_pot_never_reaches_the_model(client, brain, db):
+    fund(client, 14.0)
+
+    result = ask(client, "lunch $15")
+
+    assert result["decision"] == "decline"
+    assert result["reason"] == "Pot has $14.00, you asked for $15.00. Fund it first."
+    assert brain.extract_calls == 0
+    assert brain.decide_calls == 0
+    assert db.pot_balance() == 14.0
+
+
+def test_stated_price_the_pot_covers_takes_the_normal_path(client, brain, db):
+    fund(client, 20.0)
+
+    result = ask(client, "fried chicken drumstick $6")
+
+    assert brain.extract_calls == 1
+    assert brain.decide_calls == 1
+    assert result["decision"] == "approve"
+    assert db.pot_balance() == 14.0
+
+
+def test_no_stated_price_with_empty_pot_still_asks_the_model(client, brain, db):
+    brain.extract_result = {"amount_usd": None, "item": "cake", "category": "food"}
+
+    result = ask(client, "a cake")
+
+    assert brain.extract_calls == 1
+    assert brain.decide_calls == 0
+    assert result["decision"] == "ask"
+    assert result["reason"] == "How much is it?"
+    assert result["status"] == "ask"
+
+
+def test_ambiguous_price_still_gets_the_pot_check_after_extract(client, brain, db, paypal):
+    brain.extract_result = {"amount_usd": 8.0, "item": "teas", "category": "drink"}
+
+    result = ask(client, "2 teas at $4 each")
+
+    assert brain.extract_calls == 1
+    assert brain.decide_calls == 0
+    assert result["decision"] == "decline"
+    assert result["reason"] == "Pot has $0.00, you asked for $8.00. Fund it first."
+    assert paypal.payouts == []
+
+
 def test_funding_the_pot_via_paypal(client, db, paypal):
     data = fund(client, 20.0)
 
