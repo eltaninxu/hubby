@@ -1,0 +1,10 @@
+{# A ledger row's amount: "+$5.00" / "−$4.50" when money moved; the bare figure,
+   struck through and labelled, when it did not. Used by "Last 6" and the ledger. #}
+{% macro amount(entry) -%}
+{%- set a = amount_view(entry) -%}
+{%- if a.label -%}
+<span class="no-money" title="no money moved">{{ a.text }}</span> <span class="no-money-note">{{ a.label }}</span>
+{%- else -%}
+{{ a.sign }}{{ a.text }}
+{%- endif -%}
+{%- endmacro %}

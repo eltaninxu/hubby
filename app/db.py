@@ -77,6 +77,23 @@ def month_prefix(moment: datetime | None = None) -> str:
     return (moment or utcnow()).strftime("%Y-%m")
 
 
+# Which rows moved money. This restates, for the display layer, the statuses that
+# pot_balance() / month_deposits() / month_releases() count in SQL below; the
+# tests insert every status the code writes and check the two agree. A pending
+# release already left the pot, so it counts; a pending deposit has not arrived.
+DEPOSIT_MONEY_STATUSES = ("paid",)
+RELEASE_MONEY_STATUSES = ("released", "pending", "unclaimed")
+
+
+def money_moved(kind: str | None, status: str | None) -> bool:
+    """True when this row is part of the pot arithmetic. Requests never are."""
+    if kind == "deposit":
+        return status in DEPOSIT_MONEY_STATUSES
+    if kind == "release":
+        return status in RELEASE_MONEY_STATUSES
+    return False
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)

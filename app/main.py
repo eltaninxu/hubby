@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.budget import money, pot_covers, pot_refusal_reason, stated_amount
 from app.config import ConfigError, get_settings
-from app.db import Database, today_iso
+from app.db import Database, money_moved, today_iso
 from app.llm import LLMError, HubbyBrain
 from app.paypal import PayPalError, client_from_settings, payout_error_message
 from app.ratelimit import DailyBudget, RateLimiter
@@ -31,6 +31,31 @@ log = logging.getLogger("hubby")
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.globals["money"] = money
+
+# What a deposit or release row says when no money moved (see db.money_moved).
+NO_MONEY_LABELS = {
+    ("deposit", "pending"): "awaiting payment",
+    ("deposit", "cancelled"): "cancelled",
+    ("deposit", "capture_failed"): "capture failed",
+    ("release", "failed"): "payout failed",
+}
+
+
+def amount_view(entry: dict[str, Any]) -> dict[str, Any]:
+    """How a ledger row shows its amount: a +/- only when money really moved,
+    otherwise the plain figure and a label saying why it did not."""
+    kind = entry.get("kind")
+    status = entry.get("status") or ""
+    text = money(entry.get("amount_usd"))
+    if kind not in {"deposit", "release"}:
+        return {"sign": "", "text": text, "label": None}
+    if money_moved(kind, status):
+        return {"sign": "+" if kind == "deposit" else "−", "text": text, "label": None}
+    label = NO_MONEY_LABELS.get((kind, status), status.replace("_", " ") or "no money moved")
+    return {"sign": "", "text": text, "label": label}
+
+
+templates.env.globals["amount_view"] = amount_view
 
 # "3", "$3", "about 3.50", "3 dollars" -- an answer to "how much is it?"
 FOLLOWUP_PRICE = re.compile(
@@ -191,6 +216,11 @@ def _pot_view(db: Database) -> dict[str, Any]:
     }
 
 
+def _side_view(db: Database) -> dict[str, Any]:
+    """Everything the side panel shows; the page and its fragment share it."""
+    return {"pot": _pot_view(db), "recent": db.recent(6)}
+
+
 def _rate_limited(request: Request, scope: str) -> JSONResponse | None:
     allowed, retry_after = request.app.state.limiter.allow(scope, _client_ip(request))
     if allowed:
@@ -209,12 +239,22 @@ async def chat_page(request: Request, flash: str | None = None):
     response = templates.TemplateResponse(
         request,
         "chat.html",
-        {"flash": flash, "pot": _pot_view(db), "recent": db.recent(6)},
+        {"flash": flash, **_side_view(db)},
     )
     if not request.cookies.get("hubby_sid"):
         response.set_cookie(
             "hubby_sid", uuid.uuid4().hex, httponly=True, samesite="lax", max_age=86_400
         )
+    return response
+
+
+@app.get("/fragments/sidepanel", response_class=HTMLResponse)
+async def sidepanel_fragment(request: Request):
+    """The side panel's markup alone, for chat.js to swap in without a reload."""
+    response = templates.TemplateResponse(
+        request, "_sidepanel.html", _side_view(request.app.state.db)
+    )
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 

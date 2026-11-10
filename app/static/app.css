@@ -308,3 +308,16 @@ table.ledger {
   font: inherit;
   background: #fff;
 }
+
+/* --- rows where no money moved: no sign, struck through, labelled --- */
+.no-money { text-decoration: line-through; }
+.no-money-note {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+.mini-amount { white-space: nowrap; }
+.mini li.void .mini-text { color: var(--muted); }
+.mini li.void .dot { background: #cfc9bf; }
+.ledger .num .no-money-note { display: block; text-decoration: none; }

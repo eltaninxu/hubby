@@ -1,0 +1,37 @@
+{# The side panel, rendered by the home page and by /fragments/sidepanel.
+   chat.js swaps in the [data-live] parts of the fragment by id and leaves the
+   rest (the fund form, with its typed amount and listener) alone. #}
+{% from "_macros.html" import amount %}
+<div class="card">
+  <div class="card-head">
+    <span>Pot</span>
+    <strong id="pot-value" data-live data-pot="{{ '%.2f'|format(pot.pot) }}">{{ money(pot.pot) }}</strong>
+  </div>
+  <p class="hint">Money stays in Hubby's PayPal account until it says yes.</p>
+  <form class="fund" id="fund">
+    <input id="fund-amount" type="number" min="1" step="1" value="20" aria-label="amount to fund">
+    <button type="submit">Fund the pot</button>
+  </form>
+  <ul class="totals" id="pot-totals" data-live>
+    <li><span>deposited this month</span><span>{{ money(pot.deposits) }}</span></li>
+    <li><span>released this month</span><span>{{ money(pot.releases) }}</span></li>
+    {% for row in pot.categories %}
+      <li class="sub"><span>{{ row.category }}</span><span>{{ money(row.total) }}</span></li>
+    {% endfor %}
+  </ul>
+</div>
+
+<div class="card">
+  <div class="card-head"><span>Last 6</span><a class="small" href="/ledger">ledger</a></div>
+  <ul class="mini" id="recent" data-live>
+    {% for e in recent %}
+      <li{% if amount_view(e).label %} class="void"{% endif %}>
+        <span class="dot {{ e.kind }} {{ e.status }}"></span>
+        <span class="mini-text">{{ e.raw_text }}</span>
+        <span class="mini-amount">{{ amount(e) }}</span>
+      </li>
+    {% else %}
+      <li class="muted">empty</li>
+    {% endfor %}
+  </ul>
+</div>

@@ -147,6 +147,9 @@ async function sendRequest(text) {
     send.disabled = false;
     input.focus();
   }
+  // The answer is drawn and the input is free again: now the rest of the side
+  // panel can catch up with the rows this request wrote (never part of the chat).
+  syncSidePanel();
 }
 
 form.addEventListener("submit", (event) => {
@@ -165,17 +168,51 @@ function stopPolling() {
   pollTimer = null;
 }
 
-// Show the pot as the server has it. Never while a request is in flight: its
-// release row moves the pot mid-answer, and the verdict sets the number itself.
-// Returns whether the number changed.
+// The side panel is rendered by the server (templates/_sidepanel.html, the same
+// partial the page uses). Fetch it and swap in only the parts marked data-live,
+// in place by id: the pot, the month totals and Last 6. The fund form, the chat
+// column and the page itself are never touched. Never while a request is in
+// flight: its release row moves the pot mid-answer, and the verdict sets the
+// number itself; the end of that request refreshes the panel. A newer refresh
+// beats an older one that lands late. Returns whether the panel was updated.
+let sideSeq = 0;
+
+async function refreshSidePanel() {
+  if (!potValue || input.disabled) return false;
+  const seq = ++sideSeq;
+  const response = await fetch("/fragments/sidepanel", { cache: "no-store" });
+  if (!response.ok) throw new Error("side panel " + response.status);
+  const html = await response.text();
+  if (seq !== sideSeq || input.disabled) return false;
+  const fresh = new DOMParser().parseFromString(html, "text/html");
+  fresh.querySelectorAll("[data-live]").forEach((node) => {
+    const live = document.getElementById(node.id);
+    if (!live) return;
+    live.innerHTML = node.innerHTML;
+    Object.assign(live.dataset, node.dataset);
+  });
+  return true;
+}
+
+// Refresh the panel from an event, and if the fetch fails, try once more shortly
+// (the poll only repairs a changed pot number, not a panel the verdict already
+// set the number of).
+function syncSidePanel() {
+  refreshSidePanel().catch(() => {
+    setTimeout(() => refreshSidePanel().catch(() => {}), 3000);
+  });
+}
+
+// The cheap poll: just the pot number. When it differs from the one on screen,
+// the whole panel is refreshed (its number comes from the same render).
+// Returns whether the panel was refreshed because the number changed.
 async function refreshPot() {
   if (!potValue || input.disabled) return false;
   const response = await fetch("/api/pot");
   const data = await response.json();
   if (input.disabled) return false;
-  const changed = Number(data.pot).toFixed(2) !== potValue.dataset.pot;
-  setPot(data.pot);
-  return changed;
+  if (Number(data.pot).toFixed(2) === potValue.dataset.pot) return false;
+  return refreshSidePanel();
 }
 
 function pollPot() {
@@ -193,7 +230,10 @@ function pollPot() {
 }
 
 // The PayPal window comes back to "/?flash=…", paid or cancelled. It tells the
-// page that opened it, which settles the pot once and stops polling.
+// other open pages, which refresh the side panel and stop polling. Not only
+// while a poll is running: a second window can come back after the first one
+// stopped it, or after the poll gave up. (A cancelled funding leaves the pot
+// alone but changes its row in Last 6.)
 if (new URLSearchParams(window.location.search).has("flash")) {
   try {
     localStorage.setItem(PAYPAL_BACK, String(Date.now()));
@@ -201,14 +241,10 @@ if (new URLSearchParams(window.location.search).has("flash")) {
     /* no storage: the poll still settles a paid funding */
   }
 }
-window.addEventListener("storage", async (event) => {
-  if (event.key !== PAYPAL_BACK || !pollTimer) return;
+window.addEventListener("storage", (event) => {
+  if (event.key !== PAYPAL_BACK) return;
   stopPolling();
-  try {
-    await refreshPot();
-  } catch (err) {
-    /* the number stays as it was */
-  }
+  syncSidePanel();
 });
 
 if (fundForm) {
@@ -234,6 +270,7 @@ if (fundForm) {
       window.open(data.approve_url, "_blank", "noopener");
       addNote("PayPal window opened. Finish the payment, and the pot updates by itself.");
       pollPot();
+      syncSidePanel(); // the pending deposit row exists now
     } catch (err) {
       addError("Could not start funding: " + err.message);
     } finally {
